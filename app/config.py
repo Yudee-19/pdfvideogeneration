@@ -22,12 +22,14 @@ class Settings(BaseSettings):
     # --- Video & Text Settings (from your files) ---
     DEFAULT_FONT_REGULAR: str = str(FONTS_PATH / "PlayfairDisplay-Regular.ttf")
     DEFAULT_FONT_BOLD: str = str(FONTS_PATH / "PlayfairDisplay-Medium.ttf")
-    # DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "1920x1080-white-solid-color-background.jpg") #for 1080 p quality
-    DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "854x480-white-background.jpg")     #for 480 p quality
+    DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "1920x1080-white-solid-color-background.jpg") #for 1080 p quality
+    # DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "854x480-white-background.jpg")     #for 480 p quality
     
     VIDEO_FPS: int = 30
-    VIDEO_WIDTH: int = 1920
-    VIDEO_HEIGHT: int = 1080
+    VIDEO_WIDTH: int = 1920   #for 1080 p quality
+    VIDEO_HEIGHT: int = 1080  #for 1080 p quality
+    # VIDEO_WIDTH: int = 854    #for 480 p quality
+    # VIDEO_HEIGHT: int = 480   #for 480 p quality
     VIDEO_CODEC: str = "libx264"
     
     # Text colors 
