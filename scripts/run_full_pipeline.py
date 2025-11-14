@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 from datetime import datetime
 import argparse
+import json
 
 script_dir = Path(__file__).parent
 project_root = script_dir.parent
@@ -56,6 +57,42 @@ def main(pdf_file_path: Path):
         
         logger.info(f"Book type detected: {extraction_result['book_type']}")
         logger.info(f"Tables found: {extraction_result['summary']['tables_count']}")
+
+        # =================================================================
+        # --- NEW CODE BLOCK: Page 8-10" Filter ---
+        # =================================================================
+        
+        start_page = 8
+        end_page = 10
+        
+        logger.warning(f"--- TEST MODE: Filtering text to ONLY pages {start_page}-{end_page} ---")
+        
+        #Get the JSON output from the extraction service
+        json_path = Path(extraction_result["output_files"]["json"])
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # 2. Build the new, small text script from the JSON
+        filtered_text = ""
+        # loop through the 'pages' list from the JSON data
+        for page in data['text_extraction']['pages']:
+            if start_page <= page['page_number'] <= end_page:
+                filtered_text += page['text'] + "\n\n"
+        
+        if not filtered_text.strip():
+            raise ValueError(f"No text found for pages {start_page}-{end_page}.")
+
+        # 3. CRITICAL STEP: Overwrite 'raw_text_path' to point to NEW file
+        # This new file will be passed to the dummy cleaner (Phase 1.5)
+        raw_text_path = job_dir / "filtered_pages_8_to_10.txt"
+        with open(raw_text_path, 'w', encoding='utf-8') as f:
+            f.write(filtered_text)
+        
+        logger.info(f"Filtered text for testing saved to {raw_text_path}")
+        
+        # =================================================================
+        # --- END OF PAGE CODE BLOCK ---
+        # =================================================================
         
         # ===== PHASE 1.5: TEXT CLEANING (The Dummy) =====
         logger.info("--- PHASE 1.5: Text Cleaning ---")
