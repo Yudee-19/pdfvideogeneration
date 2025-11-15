@@ -41,11 +41,14 @@ class OpenAIService:
         timestamps_path = output_dir / f"{job_id}_timestamps.json"
 
         
-        instructions = """Voice Affect: Documentary Narrator.
-Tone: Authoritative, serious, and insightful. Project a sense of gravity and expertise.
-Pacing: Measured and deliberate. Speak at a steady pace, using brief pauses to emphasize key concepts and findings.
-Emotion: Concerned yet composed. Convey the weight of the subject ("killing longevity") with a serious, thoughtful demeanor.
-Pronunciation: Crisp, clear, and precise. Pay special attention to articulating scientific terms like "degenerative," "pathogens," and "telomeres" accurately."""
+        instructions = """
+Voice Affect: You are Story teller you worked as a story teller in a book store and you are now a story teller in podcast.
+Tone: Friendly, engaging, and conversational, Speak at a moderate pace - never rushed.
+Clarity: Use clear enunciation and simple langauge.
+Pacing: Measured and deliberate. Speak at a steady pace, using brief pauses to emphasize key concepts and findings. Always have a pause between sentences, paragraphs, sections, chapters, full stop's, etc.
+Emotion: Enthusiastic and vivid, embodying a storyteller who brings the narrative to life with expressive intonation and dynamic pacing. Convey curiosity, wonder, and intrigue throughout, as if captivating an audience at a bookstore or on a podcast.
+Pronunciation: Embody a natural storyteller; use expressive phrasing, dynamic intonation, and smooth flow. Words should sound vivid and fluent, as if captivating an audience. Allow pronunciations to be naturally engaging, emphasizing clarity for important or scientific terms but always in a warm, inviting, and relatable way.
+"""
         
         try:
             # --- Call 1: Generate Audio (TTS) ---

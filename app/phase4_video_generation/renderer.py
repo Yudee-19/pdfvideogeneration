@@ -1,14 +1,19 @@
 import json
 import logging
 import os
+import tempfile
+import multiprocessing
+import shutil
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Any
+from functools import partial
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from moviepy import AudioFileClip, CompositeVideoClip, VideoClip, ImageClip
+from moviepy import AudioFileClip, CompositeVideoClip, VideoClip, ImageClip, ImageSequenceClip
 import moviepy.video.fx as vfx
 from pydantic import BaseModel
+from tqdm import tqdm
 
 from app.config import settings
 
@@ -182,6 +187,249 @@ class FrameGeneratorV11:
             return np.array(frame)
         return generate_frame
 
+    def generate_single_frame(
+        self,
+        frame_number: int,
+        frame_timestamp: float,
+        slide_index: int,
+        slide_start_time: float
+    ) -> Image.Image:
+        """
+        Generate a single frame at a specific timestamp.
+        Used for batch processing.
+        """
+        global_t = frame_timestamp
+        frame = Image.new("RGBA", (self.bg_width, self.bg_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(frame)
+        slide_lines = self.slides[slide_index]
+        layout = self.slide_layouts[slide_index]
+        
+        for line in slide_lines:
+            for word in line:
+                coords = layout.get(id(word))
+                if not coords:
+                    continue
+                
+                # State-based logic: check if word has started
+                if global_t >= word.start:
+                    font = self.bold_font
+                    color = settings.TEXT_BOLD_COLOR
+                else:
+                    font = self.regular_font
+                    color = settings.TEXT_REGULAR_COLOR
+                
+                draw.text(coords, word.word, font=font, fill=color)
+        
+        return frame
+
+
+# ============================================================================
+# BATCH PROCESSING FUNCTIONS
+# ============================================================================
+
+def _calculate_frame_timestamps(duration: float, fps: int) -> List[Tuple[int, float]]:
+    """
+    Calculate all frame timestamps for the video.
+    These are evenly spaced frame timestamps - word highlighting will use
+    Whisper timestamps directly for accuracy.
+    
+    Returns:
+        List of (frame_number, timestamp) tuples
+    """
+    total_frames = int(duration * fps)
+    frame_timestamps = []
+    frame_interval = 1.0 / fps
+    
+    for frame_num in range(total_frames):
+        # Calculate precise timestamp for each frame
+        timestamp = frame_num * frame_interval
+        frame_timestamps.append((frame_num, timestamp))
+    
+    return frame_timestamps
+
+
+def _map_frames_to_slides(
+    frame_timestamps: List[Tuple[int, float]],
+    slide_start_times: List[float],
+    audio_duration: float
+) -> List[Tuple[int, float, int, float]]:
+    """
+    Map each frame to its corresponding slide.
+    
+    Returns:
+        List of (frame_number, timestamp, slide_index, slide_start_time) tuples
+    """
+    mapped_frames = []
+    
+    for frame_num, timestamp in frame_timestamps:
+        # Find which slide this frame belongs to
+        slide_index = 0
+        slide_start = slide_start_times[0]
+        
+        for i, slide_start_time in enumerate(slide_start_times):
+            if timestamp >= slide_start_time:
+                slide_index = i
+                slide_start = slide_start_time
+            else:
+                break
+        
+        # Handle last slide
+        if slide_index == len(slide_start_times) - 1:
+            # Check if we're still within the last slide
+            if timestamp > audio_duration:
+                continue
+        
+        mapped_frames.append((frame_num, timestamp, slide_index, slide_start))
+    
+    return mapped_frames
+
+
+def _create_frame_batches(
+    mapped_frames: List[Tuple[int, float, int, float]],
+    batch_size: int
+) -> List[List[Tuple[int, float, int, float]]]:
+    """
+    Split frames into batches for parallel processing.
+    """
+    batches = []
+    for i in range(0, len(mapped_frames), batch_size):
+        batch = mapped_frames[i:i + batch_size]
+        batches.append(batch)
+    return batches
+
+
+def _generate_frame_batch_worker(
+    batch_data: Tuple[
+        List[Tuple[int, float, int, float]],  # Frame tasks
+        Dict[str, Any],  # Frame generator data
+        Path,  # Output directory
+        int,  # Width
+        int,  # Height
+    ]
+) -> List[str]:
+    """
+    Worker function to generate a batch of frames in parallel.
+    Optimized for performance.
+    
+    Args:
+        batch_data: Tuple containing:
+            - List of (frame_number, timestamp, slide_index, slide_start_time)
+            - Frame generator serialized data (slides, layouts, fonts, etc.)
+            - Output directory for saving frames
+            - Width and height
+    
+    Returns:
+        List of generated frame file paths
+    """
+    frame_tasks, gen_data, output_dir, width, height = batch_data
+    
+    # Reconstruct frame generator data (cached per worker)
+    slides = gen_data['slides']
+    slide_layouts = gen_data['slide_layouts']
+    font_size = gen_data['font_size']
+    
+    # Load fonts once per worker (cached)
+    try:
+        regular_font = ImageFont.truetype(settings.DEFAULT_FONT_REGULAR, font_size)
+        bold_font = ImageFont.truetype(settings.DEFAULT_FONT_BOLD, font_size)
+    except Exception:
+        regular_font = ImageFont.load_default(size=font_size)
+        bold_font = ImageFont.load_default(size=font_size)
+    
+    # Pre-extract colors to avoid repeated lookups
+    bold_color = settings.TEXT_BOLD_COLOR
+    regular_color = settings.TEXT_REGULAR_COLOR
+    
+    generated_files = []
+    
+    # Process frames in batch
+    for frame_num, timestamp, slide_index, slide_start in frame_tasks:
+        # Generate frame
+        frame = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(frame)
+        slide_lines = slides[slide_index]
+        layout = slide_layouts[slide_index]
+        
+        # Render all words in the slide
+        for line_idx, line in enumerate(slide_lines):
+            for word_idx, word in enumerate(line):
+                # Look up coordinates using (line_index, word_index) as key
+                unique_key = (line_idx, word_idx)
+                coords = layout.get(unique_key)
+                if not coords:
+                    continue
+                
+                # State-based logic: use Whisper timestamp directly for accuracy
+                # This ensures word highlighting matches exactly when words are spoken
+                if timestamp >= word['start']:
+                    draw.text(coords, word['word'], font=bold_font, fill=bold_color)
+                else:
+                    draw.text(coords, word['word'], font=regular_font, fill=regular_color)
+        
+        # Save frame with optimized PNG settings
+        frame_filename = output_dir / f"frame_{frame_num:06d}.png"
+        # Use optimize=False for faster saving (we'll delete these anyway)
+        frame.save(frame_filename, "PNG", optimize=False, compress_level=1)
+        generated_files.append(str(frame_filename))
+    
+    return generated_files
+
+
+def _detect_hardware_codec() -> Tuple[str, List[str]]:
+    """
+    Detect available hardware acceleration codec.
+    
+    Returns:
+        Tuple of (codec_name, additional_ffmpeg_params)
+    """
+    import subprocess
+    
+    # Try NVIDIA NVENC
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if "h264_nvenc" in result.stdout:
+            logger.info("Detected NVIDIA GPU - using h264_nvenc")
+            return "h264_nvenc", ["-preset", "fast", "-rc", "vbr", "-cq", "23"]
+    except Exception:
+        pass
+    
+    # Try Intel QuickSync
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if "h264_qsv" in result.stdout:
+            logger.info("Detected Intel QuickSync - using h264_qsv")
+            return "h264_qsv", ["-preset", "fast", "-global_quality", "23"]
+    except Exception:
+        pass
+    
+    # Try AMD AMF
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if "h264_amf" in result.stdout:
+            logger.info("Detected AMD GPU - using h264_amf")
+            return "h264_amf", ["-quality", "balanced", "-rc", "vbr_peak"]
+    except Exception:
+        pass
+    
+    # Fallback to software encoding
+    logger.info("No hardware acceleration detected - using libx264 (software)")
+    return "libx264", ["-preset", "fast", "-crf", "23"]
+
 
 # This is the "callable" version 
 def render_video(
@@ -190,7 +438,7 @@ def render_video(
     output_path: Path
 ) -> Path:
     """
-    Renders the final karaoke-style video.
+    Renders the final karaoke-style video using batch processing for faster rendering.
     
     Args:
         audio_path: Path to the PROCESSED audio file.
@@ -200,73 +448,172 @@ def render_video(
     Returns:
         The path to the rendered video.
     """
-    logger.info("--- Starting Video Rendering Pipeline ---")
+    logger.info("--- Starting Video Rendering Pipeline (Batch Processing) ---")
+    
+    temp_frames_dir = None
     
     try:
         logger.info(f"Loading audio: {audio_path}")
         audio_clip = AudioFileClip(str(audio_path))
+        audio_duration = audio_clip.duration
         
-        # --- 4. Load background/config from settings ---
+        # --- Load background/config from settings ---
         background_path = settings.DEFAULT_BACKGROUND
         fps = settings.VIDEO_FPS
         width = settings.VIDEO_WIDTH
         height = settings.VIDEO_HEIGHT
         
         logger.info(f"Loading background: {background_path}")
-        bg_clip = ImageClip(background_path).with_duration(audio_clip.duration)
+        bg_clip = ImageClip(background_path).with_duration(audio_duration)
 
+        # Initialize frame generator
         frame_gen = FrameGeneratorV11(
             timestamps_path=timestamps_path,
             bg_width=width,
             bg_height=height
         )
 
-        logger.info("Generating video clips for each slide...")
-        all_slide_clips = []
-        fade_duration = 0.25
-        start_times = frame_gen.slide_start_times
-        num_slides = len(start_times)
-
-        for i in range(num_slides):
-            slide_start = start_times[i]
-            if i + 1 < num_slides:
-                clip_duration = (start_times[i+1] - slide_start) + fade_duration
-            else:
-                clip_duration = audio_clip.duration - slide_start
-            if clip_duration <= fade_duration: continue
-
-            slide_clip = VideoClip(
-                frame_function=frame_gen.make_frame_function(
-                    slide_index=i,
-                    slide_start_time=slide_start
-                ),
-                duration=clip_duration,
-                is_mask=True
-            )
-            if i > 0:
-                slide_clip = vfx.FadeIn(duration=fade_duration, initial_color=[0, 0, 0, 0]).apply(slide_clip)
-            if i < num_slides - 1:
-                slide_clip = vfx.FadeOut(duration=fade_duration, final_color=[0, 0, 0, 0]).apply(slide_clip)
+        # ====================================================================
+        # PHASE 1: Pre-calculation
+        # ====================================================================
+        logger.info("--- Phase 1: Pre-calculating frame timestamps ---")
+        frame_timestamps = _calculate_frame_timestamps(audio_duration, fps)
+        logger.info(f"Calculated {len(frame_timestamps)} frames for {audio_duration:.2f}s video at {fps}fps")
+        
+        mapped_frames = _map_frames_to_slides(
+            frame_timestamps,
+            frame_gen.slide_start_times,
+            audio_duration
+        )
+        logger.info(f"Mapped {len(mapped_frames)} frames to {len(frame_gen.slide_start_times)} slides")
+        
+        # Calculate optimal batch size - larger batches reduce overhead
+        cpu_count = os.cpu_count() or 4
+        # Use larger batches to reduce multiprocessing overhead
+        # Target: 200-500 frames per batch for better efficiency
+        batch_size = max(200, len(mapped_frames) // (cpu_count * 2))
+        batches = _create_frame_batches(mapped_frames, batch_size)
+        logger.info(f"Created {len(batches)} batches (batch size: {batch_size}, workers: {cpu_count})")
+        
+        # Serialize frame generator data for multiprocessing
+        # Convert WordTimestamp objects to dicts for serialization
+        # Use (line_index, word_index) as unique key to prevent collisions
+        serialized_slides = []
+        serialized_layouts = {}
+        
+        for slide_idx, slide in enumerate(frame_gen.slides):
+            serialized_slide = []
+            serialized_layout = {}
             
-            slide_clip = slide_clip.with_start(slide_start)
-            all_slide_clips.append(slide_clip)
+            # Get the layout for this slide
+            layout = frame_gen.slide_layouts.get(slide_idx, {})
+            
+            for line_idx, line in enumerate(slide):
+                serialized_line = []
+                for word_idx, word in enumerate(line):
+                    # Create unique key: (line_index, word_index)
+                    unique_key = (line_idx, word_idx)
+                    
+                    # Store word data
+                    word_data = {
+                        'word': word.word,
+                        'start': word.start,
+                        'end': word.end
+                    }
+                    serialized_line.append(word_data)
+                    
+                    # Store layout coordinates using unique key
+                    word_id = id(word)
+                    if word_id in layout:
+                        serialized_layout[unique_key] = layout[word_id]
+                
+                serialized_slide.append(serialized_line)
+            
+            serialized_slides.append(serialized_slide)
+            serialized_layouts[slide_idx] = serialized_layout
         
-        logger.info(f"Created {len(all_slide_clips)} slide clips.")
-        logger.info("Compositing final video...")
+        gen_data = {
+            'slides': serialized_slides,
+            'slide_layouts': serialized_layouts,
+            'slide_start_times': frame_gen.slide_start_times,
+            'font_size': frame_gen.font_size,
+            'line_height': frame_gen.line_height,
+            'max_text_width': frame_gen.max_text_width
+        }
         
-        final_video = CompositeVideoClip([bg_clip] + all_slide_clips)
+        # ====================================================================
+        # PHASE 2: Parallel Frame Generation
+        # ====================================================================
+        logger.info("--- Phase 2: Generating frames in parallel batches ---")
+        
+        # Create temporary directory for frames
+        temp_frames_dir = Path(tempfile.mkdtemp(prefix="video_frames_"))
+        logger.info(f"Temporary frames directory: {temp_frames_dir}")
+        
+        # Prepare batch data for workers
+        batch_data_list = [
+            (batch, gen_data, temp_frames_dir, width, height)
+            for batch in batches
+        ]
+        
+        # Generate frames in parallel
+        all_frame_files = []
+        num_workers = min(cpu_count, len(batches))
+        
+        logger.info(f"Starting parallel frame generation with {num_workers} workers...")
+        with multiprocessing.Pool(processes=num_workers) as pool:
+            # Use tqdm for progress tracking
+            # Use imap_unordered for better performance, then sort
+            results = list(tqdm(
+                pool.imap_unordered(_generate_frame_batch_worker, batch_data_list),
+                total=len(batches),
+                desc="Generating frames",
+                unit="batch"
+            ))
+            
+            # Flatten results
+            for batch_files in results:
+                all_frame_files.extend(batch_files)
+        
+        # Sort frame files by frame number (important for video sequence)
+        all_frame_files.sort(key=lambda x: int(Path(x).stem.split('_')[1]))
+        logger.info(f"Generated {len(all_frame_files)} frames")
+        
+        # ====================================================================
+        # PHASE 3: Video Assembly
+        # ====================================================================
+        logger.info("--- Phase 3: Assembling video from frames ---")
+        
+        # Create video clip from frame images
+        frame_clip = ImageSequenceClip(all_frame_files, fps=fps)
+        
+        # Composite with background
+        final_video = CompositeVideoClip([bg_clip, frame_clip])
         final_video = final_video.with_audio(audio_clip)
-
+        
+        # ====================================================================
+        # PHASE 4: Optimized Encoding
+        # ====================================================================
+        logger.info("--- Phase 4: Encoding video ---")
+        
+        # Detect hardware acceleration
+        codec, codec_params = _detect_hardware_codec()
+        
+        # Prepare FFmpeg parameters
+        ffmpeg_params = ["-pix_fmt", "yuv420p"] + codec_params
+        
         logger.info(f"Rendering {fps}fps video to: {output_path}")
+        logger.info(f"Using codec: {codec}")
         
         final_video.write_videofile(
             str(output_path),
             fps=fps,
-            codec=settings.VIDEO_CODEC,
+            codec=codec,
             audio_codec="aac",
-            preset="medium",
+            preset="fast",
             threads=os.cpu_count(),
-            ffmpeg_params=["-pix_fmt", "yuv420p"]
+            ffmpeg_params=ffmpeg_params,
+            logger=None  # Suppress MoviePy's progress bar (we have tqdm)
         )
         
         logger.info("--- Video Rendering Complete ---")
@@ -275,3 +622,15 @@ def render_video(
     except Exception as e:
         logger.error("Video rendering pipeline failed!", exc_info=True)
         raise
+    
+    finally:
+        # ====================================================================
+        # PHASE 5: Cleanup
+        # ====================================================================
+        if temp_frames_dir and temp_frames_dir.exists():
+            logger.info(f"Cleaning up temporary frames directory: {temp_frames_dir}")
+            try:
+                shutil.rmtree(temp_frames_dir)
+                logger.info("Temporary files cleaned up successfully")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary files: {e}")
