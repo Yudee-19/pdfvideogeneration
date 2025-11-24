@@ -226,7 +226,7 @@ class PipelineService:
                 logger.info(f"Using Cartesia for voice generation (Voice: {voice_id}, Model: {model_id})")
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
-                logger.info(f"Using OpenAI for voice generation")
+                logger.info(f"Using OpenAI for voice generation with voice: onyx")
                 voice_service = OpenAIService(voice="onyx")
             
             # Estimate number of chunks to provide progress updates
@@ -593,7 +593,7 @@ class PipelineService:
                 logger.info(f"Using Cartesia (Voice: {voice_id}, Model: {model_id})")
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
-                logger.info("Using OpenAI for voice generation")
+                logger.info("Using OpenAI for voice generation with voice: onyx")
                 voice_service = OpenAIService(voice="onyx")
             
             raw_audio_path, timestamps_path = voice_service.generate_audio_with_timestamps(
@@ -819,7 +819,7 @@ class PipelineService:
                 logger.info(f"Using Cartesia (Voice: {voice_id}, Model: {model_id})")
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
-                logger.info("Using OpenAI for voice generation")
+                logger.info("Using OpenAI for voice generation with voice: onyx")
                 voice_service = OpenAIService(voice="onyx")
             
             raw_audio_path, timestamps_path = voice_service.generate_audio_with_timestamps(

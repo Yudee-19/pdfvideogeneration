@@ -50,6 +50,9 @@ def master_audio(raw_audio_path: Path, processed_audio_path: Path) -> Path:
 
         # --- Step 1: Static reduction + band limiting ---
         logger.info("Step 1: Reducing broadband static and hum...")
+        logger.info("  - Applying highpass filter (90Hz) to remove low-frequency rumble")
+        logger.info("  - Applying lowpass filter (16kHz) to remove harsh high frequencies")
+        logger.info("  - Applying FFT-based denoiser (afftdn) to remove hiss and static noise")
         static_filter = (
             "highpass=f=90,"        # Remove very low rumble
             "lowpass=f=16000,"      # Remove harsh highs
@@ -66,6 +69,7 @@ def master_audio(raw_audio_path: Path, processed_audio_path: Path) -> Path:
 
         # --- Step 2: Fine denoise & smooth ---
         logger.info("Step 2: Applying fine noise reduction...")
+        logger.info("  - Applying non-linear median denoise (anlmdn) for additional static removal")
         fine_denoise_filter = "anlmdn=s=0.00005"  # Non-linear median denoise (gentle)
         fine_denoise_command = [
             "ffmpeg",

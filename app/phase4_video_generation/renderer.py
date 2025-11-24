@@ -78,9 +78,9 @@ class FrameGeneratorV11:
         else:
             # LAPTOP/LANDSCAPE MODE (Main video generation)
             # Fixed margins - these should NEVER change during rendering
-            # Equal margins on all sides for perfect centering (matching image style)
+            # Fixed 150px left padding - text should never expand beyond this
             self.margin = 150
-            self.left_margin = 80  # Left margin - slightly reduced to shift text left
+            self.left_margin = 150  # Fixed 150px left padding - never changes
             self.right_margin = 200  # Right margin (keeps text area width)
             self.top_margin = 150  # Fixed top margin - never changes
             self.bottom_margin = 200  # Fixed bottom margin - never changes (equal to top for perfect centering)
@@ -105,7 +105,7 @@ class FrameGeneratorV11:
             self.max_text_width = self.bg_width - self.left_margin - self.right_margin
             self.max_text_height = self.bg_height - (2 * self.margin)
         
-        self.slides, self.slide_layouts, self.slide_start_times = self._build_grouped_slides()
+        self.slides, self.slide_layouts, self.slide_start_times, self.slide_end_times = self._build_grouped_slides()
         logger.info(f"FrameGeneratorV11 initialized: {len(self.segments)} segments grouped into {len(self.slides)} slides.")
 
     def _load_fonts(self, size: int) -> Tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
@@ -196,6 +196,9 @@ class FrameGeneratorV11:
         
         if words_after_mapping != words_before_mapping:
             logger.warning(f"Word count changed during punctuation mapping: {words_before_mapping} -> {words_after_mapping}")
+        
+        # Clean text: remove all punctuation except full stops (periods)
+        words = self._clean_text(words)
         
         logger.info(f"Final word count: {len(words)} words and {len(segments)} segments.")
         return words, segments
@@ -319,6 +322,45 @@ class FrameGeneratorV11:
         
         return updated_words
 
+    def _clean_text(self, words: List[WordTimestamp]) -> List[WordTimestamp]:
+        """
+        Clean text by removing all punctuation except full stops (periods).
+        Normalize spacing to remove extra spaces.
+        After every full stop, a new line will start (handled by slide building logic).
+        
+        Args:
+            words: List of WordTimestamp objects to clean
+            
+        Returns:
+            List of WordTimestamp objects with cleaned text (only periods preserved, spacing normalized)
+        """
+        import re
+        
+        cleaned_words = []
+        for word in words:
+            # Remove all punctuation except periods (full stops)
+            # Keep periods and alphanumeric characters, remove everything else
+            cleaned_word = re.sub(r'[^\w\s.]', '', word.word)
+            # Normalize spacing: remove leading/trailing spaces and collapse multiple spaces to single space
+            cleaned_word = re.sub(r'\s+', ' ', cleaned_word).strip()
+            # Remove any whitespace-only words but keep the word if it has content
+            if cleaned_word or word.word.strip():
+                # Create new WordTimestamp with cleaned word
+                cleaned_word_obj = WordTimestamp(
+                    word=cleaned_word,
+                    start=word.start,
+                    end=word.end,
+                    confidence=word.confidence if hasattr(word, 'confidence') else None,
+                    probability=word.probability if hasattr(word, 'probability') else None
+                )
+                cleaned_words.append(cleaned_word_obj)
+            else:
+                # If word becomes empty after cleaning, still include it to preserve timing
+                cleaned_words.append(word)
+        
+        logger.info(f"Cleaned text: removed all punctuation except periods and normalized spacing from {len(words)} words")
+        return cleaned_words
+
     def _get_words_for_segment(self, segment_index: int, processed_words: set = None) -> List[WordTimestamp]:
         """
         Get words for a segment. Uses lenient matching to ensure no words are missed.
@@ -348,16 +390,17 @@ class FrameGeneratorV11:
         
         return words
 
-    def _build_grouped_slides(self) -> Tuple[List[List[List[WordTimestamp]]], Dict[int, Dict[int, Tuple[int, int]]], List[float]]:
+    def _build_grouped_slides(self) -> Tuple[List[List[List[WordTimestamp]]], Dict[int, Dict[int, Tuple[int, int]]], List[float], List[float]]:
         logger.info("Building grouped slides (Max Words strategy)...")
         slides, layouts, slide_start_times = [], {}, []
         dummy_img = Image.new("RGB", (self.bg_width, self.bg_height))
         draw = ImageDraw.Draw(dummy_img)
         space_bbox = draw.textbbox((0, 0), " ", font=self.bold_font); space_width = space_bbox[2] - space_bbox[0]
 
-        MAX_WORDS_PER_SLIDE = 15 #allow up to 20 words per slide
-        # Use dynamic max_lines for reels, otherwise use default
-        MAX_LINES_PER_SLIDE = self.max_lines if self.max_lines is not None else 4  # maximum lines per slide
+        MAX_WORDS_PER_SLIDE = 12  # Maximum 12 words per slide
+        MAX_LINES_PER_SLIDE = 4  # Fixed: Maximum 3 lines per slide (always 3, no dynamic)
+        
+        logger.info(f"Slide constraints: Maximum {MAX_LINES_PER_SLIDE} lines and {MAX_WORDS_PER_SLIDE} words per slide")
 
         current_slide_words_ts, current_slide_start_time, current_slide_segments = [], -1, []
 
@@ -382,17 +425,83 @@ class FrameGeneratorV11:
             # The word.word from timestamps already contains proper punctuation
 
             current_slide_lines, current_line = [], []
-            max_available_height = self.bg_height - self.top_margin - self.bottom_margin
-            max_lines_that_fit = max(1, (max_available_height - 20) // self.line_height)  # -20px safety margin
-            # For reels, enforce MAX_LINES_PER_SLIDE limit (use the stricter of the two)
-            if MAX_LINES_PER_SLIDE:
-                max_lines_that_fit = min(max_lines_that_fit, MAX_LINES_PER_SLIDE)
+            # CRITICAL: Always use MAX_LINES_PER_SLIDE (fixed at 3) - do not calculate dynamically
+            max_lines_that_fit = MAX_LINES_PER_SLIDE  # Fixed: Always 3 lines maximum
             
             processed_words = []
             remaining_words = []
             words_to_process = list(words_ts)  # Make a copy to track which words we process
             
+            # CRITICAL: Check for sentence boundaries - words after full stop MUST start new slide
+            # Find the first word that comes after a full stop (if any)
+            def _word_ends_sentence_check(word_text: str) -> bool:
+                """Check if word ends with a full stop (sentence ending)."""
+                if not word_text:
+                    return False
+                cleaned = word_text.strip()
+                if not cleaned:
+                    return False
+                # Remove trailing quotes, brackets, etc. but keep periods
+                while cleaned and cleaned[-1] in {"'", '"', '"', '"', "'", ")", "]", "}", " "}:
+                    cleaned = cleaned[:-1]
+                if not cleaned or cleaned[-1] != ".":
+                    return False
+                # Check for abbreviations
+                word_lower = cleaned.lower()
+                abbreviations = {
+                    'mr.', 'mrs.', 'ms.', 'miss.', 'dr.', 'prof.', 'rev.', 'fr.', 'sr.', 'jr.',
+                    'hon.', 'esq.', 'sir.', 'dame.', 'lord.', 'lady.', 'ph.d.', 'm.d.', 'd.d.s.', 'd.v.m.',
+                    'rn.', 'cpa.', 'llc.', 'llp.', 'a.m.', 'p.m.', 'am.', 'pm.', 'b.c.', 'a.d.', 'bc.', 'ad.',
+                    'jan.', 'feb.', 'mar.', 'apr.', 'may.', 'jun.', 'jul.', 'aug.', 'sep.', 'sept.', 'oct.', 'nov.', 'dec.',
+                    'vs.', 'v.', 'etc.', 'e.g.', 'i.e.', 'viz.', 'cf.', 'ex.', 'et al.', 'inc.', 'ltd.', 'corp.', 'co.',
+                    'st.', 'ave.', 'blvd.', 'rd.', 'ct.', 'ln.', 'pkwy.', 'sq.', 'n.', 's.', 'e.', 'w.', 'nw.', 'ne.', 'sw.', 'se.',
+                    'no.', 'vol.', 'pp.', 'p.', 'ch.', 'sec.', 'fig.', 'art.', 'ft.', 'in.', 'lb.', 'oz.', 'kg.', 'g.', 'ml.', 'l.',
+                    'ed.', 'est.', 'approx.', 'min.', 'max.', 'avg.', 'std.', 'gov.', 'pres.', 'sen.', 'rep.', 'gen.', 'col.', 'capt.',
+                    'dept.', 'univ.', 'assoc.', 'misc.', 'op.', 'cit.'
+                }
+                if word_lower in abbreviations or (len(cleaned) == 2 and cleaned[0].isalpha() and cleaned[1] == '.'):
+                    return False
+                if len(cleaned) >= 3 and '.' in cleaned[:-1]:
+                    return False
+                return True
+            
+            # Check if any word in the list comes after a full stop
+            # If so, split at that point - words after full stop must start new slide
+            for check_idx in range(len(words_to_process) - 1):
+                current_word = words_to_process[check_idx]
+                next_word = words_to_process[check_idx + 1]
+                
+                # If current word ends a sentence, next word must start new slide
+                if _word_ends_sentence_check(current_word.word):
+                    # Split: process words up to and including current word, rest go to next slide
+                    words_to_process = words_to_process[:check_idx + 1]
+                    remaining_words = words_ts[check_idx + 1:]
+                    logger.info(f"Slide {slide_index}: Detected sentence boundary - word '{current_word.word}' ends sentence. Splitting: {len(words_to_process)} words in this slide, {len(remaining_words)} words start next slide")
+                    break
+            
+            # CRITICAL: Check word count constraint
+            # If we already have MAX_WORDS_PER_SLIDE words, we need to split
+            if len(words_to_process) > MAX_WORDS_PER_SLIDE:
+                # Process only first MAX_WORDS_PER_SLIDE words, rest go to next slide
+                words_to_process = words_to_process[:MAX_WORDS_PER_SLIDE]
+                remaining_words = words_ts[MAX_WORDS_PER_SLIDE:] if not remaining_words else remaining_words
+                logger.debug(f"Slide {slide_index}: Word count limit reached ({MAX_WORDS_PER_SLIDE} words), splitting remaining {len(remaining_words)} words to next slide")
+            
             for word_idx, word in enumerate(words_to_process):
+                # CRITICAL: Check word count constraint FIRST - don't exceed MAX_WORDS_PER_SLIDE
+                if len(processed_words) >= MAX_WORDS_PER_SLIDE:
+                    # We've reached the word limit - remaining words go to next slide
+                    remaining_words = words_to_process[word_idx:]
+                    logger.debug(f"Slide {slide_index}: Word count limit reached ({MAX_WORDS_PER_SLIDE} words), {len(remaining_words)} words remaining for next slide")
+                    break
+                
+                # CRITICAL: Check line count constraint - don't exceed MAX_LINES_PER_SLIDE (3)
+                if len(current_slide_lines) >= MAX_LINES_PER_SLIDE:
+                    # We've reached the line limit - remaining words go to next slide
+                    remaining_words = words_to_process[word_idx:]
+                    logger.debug(f"Slide {slide_index}: Line count limit reached ({MAX_LINES_PER_SLIDE} lines), {len(remaining_words)} words remaining for next slide")
+                    break
+                
                 word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font)
                 word_width = word_bbox[2] - word_bbox[0]
                 
@@ -404,27 +513,27 @@ class FrameGeneratorV11:
                     line_bbox = draw.textbbox((0, 0), line_text, font=self.bold_font)
                     test_line_width = line_bbox[2] - line_bbox[0]
                     
-                    # Use 90% of max width as threshold for safety (very conservative)
-                    threshold = self.max_text_width * 0.90
+                    # Use 99% of max width as threshold (aggressive to fill space completely)
+                    threshold = self.max_text_width * 0.99
                     if test_line_width > threshold:
                         # Current line is full, start new line
-                        current_slide_lines.append(current_line)
-                        # Check if we've reached max lines that fit
-                        if len(current_slide_lines) >= max_lines_that_fit:
-                            # Slide is full - remaining words go to next slide
+                        # CRITICAL: Check if adding this line would exceed MAX_LINES_PER_SLIDE
+                        if len(current_slide_lines) >= MAX_LINES_PER_SLIDE:
+                            # Cannot add another line - slide is full
                             remaining_words = words_to_process[word_idx:]  # All words from current onwards
-                            current_line = []
                             break
+                        current_slide_lines.append(current_line)
                         current_line = [word]
                         processed_words.append(word)
                     else:
+                        # Word fits on current line - add it
                         current_line.append(word)
                         processed_words.append(word)
                 else:
                     # First word in line - check if we can add another line
-                    if len(current_slide_lines) >= max_lines_that_fit:
+                    if len(current_slide_lines) >= MAX_LINES_PER_SLIDE:
                         # Slide is full - remaining words go to next slide
-                        remaining_words = words_to_process[word_idx:]  # All words from current onwards
+                        remaining_words = words_to_process[word_idx:]
                         break
                     # Check if single word fits
                     if word_width > self.max_text_width:
@@ -433,9 +542,57 @@ class FrameGeneratorV11:
                     current_line.append(word)
                     processed_words.append(word)
             
-            # Add current_line if it exists and we have room
-            if current_line and len(current_slide_lines) < max_lines_that_fit:
+            # Add current_line if it exists and we have room (strictly enforce MAX_LINES_PER_SLIDE)
+            if current_line and len(current_slide_lines) < MAX_LINES_PER_SLIDE:
                 current_slide_lines.append(current_line)
+            
+            # CRITICAL: Redistribute words to fill space better
+            # If the last line has very few words and previous lines have space, try to move words up
+            # This prevents the issue of one word on a line with huge space
+            if len(current_slide_lines) >= 2:
+                last_line = current_slide_lines[-1]
+                second_last_line = current_slide_lines[-2]
+                
+                # If last line has only 1-2 words, try to move them to previous line
+                if len(last_line) <= 2 and len(second_last_line) > 0:
+                    # Test if we can fit last line words into second last line
+                    test_line = second_last_line + last_line
+                    line_text = " ".join(w.word for w in test_line)
+                    line_bbox = draw.textbbox((0, 0), line_text, font=self.bold_font)
+                    test_line_width = line_bbox[2] - line_bbox[0]
+                    
+                    # If it fits (with 99% threshold), merge them
+                    if test_line_width <= self.max_text_width * 0.99:
+                        current_slide_lines[-2] = test_line
+                        current_slide_lines.pop()  # Remove the now-empty last line
+                        logger.debug(f"Slide {slide_index}: Redistributed {len(last_line)} words from last line to previous line to fill space")
+            
+            # Additional optimization: Try to balance lines better by moving words from short lines to longer ones
+            # This helps fill space more evenly across all lines
+            if len(current_slide_lines) >= 2:
+                # Calculate average words per line
+                total_words = sum(len(line) for line in current_slide_lines)
+                avg_words_per_line = total_words / len(current_slide_lines) if current_slide_lines else 0
+                
+                # If we have lines with very different lengths, try to balance them
+                for line_idx in range(len(current_slide_lines) - 1):
+                    current_line = current_slide_lines[line_idx]
+                    next_line = current_slide_lines[line_idx + 1]
+                    
+                    # If current line is much shorter than average and next line exists
+                    if len(current_line) < avg_words_per_line * 0.7 and len(next_line) > 0:
+                        # Try moving first word(s) from next line to current line
+                        words_to_move = min(2, len(next_line))  # Try moving up to 2 words
+                        test_line = current_line + next_line[:words_to_move]
+                        line_text = " ".join(w.word for w in test_line)
+                        line_bbox = draw.textbbox((0, 0), line_text, font=self.bold_font)
+                        test_line_width = line_bbox[2] - line_bbox[0]
+                        
+                        # If it fits, move the words (99% threshold for aggressive filling)
+                        if test_line_width <= self.max_text_width * 0.99:
+                            current_slide_lines[line_idx] = test_line
+                            current_slide_lines[line_idx + 1] = next_line[words_to_move:]
+                            logger.debug(f"Slide {slide_index}: Moved {words_to_move} word(s) from line {line_idx+1} to line {line_idx} to balance spacing")
 
             # CRITICAL: Remove trailing commas from the last word of the last line in the slide
             if current_slide_lines:
@@ -455,14 +612,36 @@ class FrameGeneratorV11:
                         last_line[-1] = last_word
                         logger.debug(f"Removed trailing comma from last word '{last_word.word}' in slide {slide_index}")
 
-            # Check if slide has too many lines and reduce verbosity of warnings
+            # Check if slide exceeds constraints
+            total_words_in_slide = len(processed_words)
             total_text_height = len(current_slide_lines) * self.line_height
+            
             if MAX_LINES_PER_SLIDE and len(current_slide_lines) > MAX_LINES_PER_SLIDE:
-                # Only log as debug to reduce noise - slides will still render
-                logger.debug(f"Slide {slide_index} has {len(current_slide_lines)} lines (max recommended: {MAX_LINES_PER_SLIDE})")
-            elif total_text_height > self.bg_height * 0.95:
+                logger.warning(f"Slide {slide_index} exceeds line limit: {len(current_slide_lines)} lines (max: {MAX_LINES_PER_SLIDE})")
+            if total_words_in_slide > MAX_WORDS_PER_SLIDE:
+                logger.warning(f"Slide {slide_index} exceeds word limit: {total_words_in_slide} words (max: {MAX_WORDS_PER_SLIDE})")
+            
+            # Log slide summary
+            logger.debug(f"Slide {slide_index}: {len(current_slide_lines)} lines, {total_words_in_slide} words (max: {MAX_LINES_PER_SLIDE} lines, {MAX_WORDS_PER_SLIDE} words)")
+            
+            if total_text_height > self.bg_height * 0.95:
                  logger.warning(f"Slide {slide_index} (starting {start_time}s) may be too tall! Has {len(current_slide_lines)} lines.")
 
+            # CRITICAL: Remove the last word from the slide if there are remaining words
+            # This prevents duplication where the last word of a slide is the same as the first word of the next slide
+            # BUT: Only do this if it's NOT the first slide (slide_index > 0) to keep the first slide unchanged
+            if remaining_words and slide_index > 0 and current_slide_lines:
+                last_line = current_slide_lines[-1]
+                if last_line and len(last_line) > 0:
+                    # Remove the last word from the last line to prevent duplication
+                    removed_word = last_line.pop()
+                    logger.debug(f"Slide {slide_index}: Removed last word '{removed_word.word}' to prevent duplication with next slide (next slide starts with '{remaining_words[0].word if remaining_words else 'N/A'}')")
+                    
+                    # If the last line is now empty, remove it
+                    if not last_line:
+                        current_slide_lines.pop()
+                        logger.debug(f"Slide {slide_index}: Removed empty last line after removing duplicate word")
+            
             slides.append(current_slide_lines); layouts[slide_index] = {}
 
             # ====================================================================
@@ -496,17 +675,14 @@ class FrameGeneratorV11:
             available_width = self.bg_width - min_margin_left - min_margin_right
             available_height = self.bg_height - min_margin_top - min_margin_bottom
             
-            # Step 4: Calculate dynamic padding for perfect centering
-            # Padding = (available_space - content_size) / 2
-            # This ensures content is perfectly centered with equal padding on all sides
-            padding_horizontal = max(0, (available_width - content_width) / 2)
-            padding_vertical = max(0, (available_height - content_height) / 2)
-            
-            # Step 5: Calculate final text area boundaries
-            # Text block is centered horizontally and vertically
-            text_area_start_x = min_margin_left + padding_horizontal
-            text_area_end_x = self.bg_width - min_margin_right - padding_horizontal
+            # Step 4: Fixed 150px left padding - text area starts at exactly 150px from left
+            # NO dynamic horizontal padding - left side is fixed at 150px
+            text_area_start_x = 150  # Fixed 150px left padding - never changes
+            text_area_end_x = self.bg_width - min_margin_right  # Right boundary uses right margin
             text_area_width = text_area_end_x - text_area_start_x
+            
+            # Step 5: Calculate vertical padding (only vertical centering, horizontal is fixed)
+            padding_vertical = max(0, (available_height - content_height) / 2)
             
             # Vertical positioning - centered with equal padding
             start_y = min_margin_top + padding_vertical
@@ -524,7 +700,7 @@ class FrameGeneratorV11:
             # Log padding for debugging
             logger.debug(
                 f"Slide {slide_index}: Content={content_width}x{content_height}px, "
-                f"Padding H={padding_horizontal:.1f}px V={padding_vertical:.1f}px, "
+                f"Fixed left padding=150px, Padding V={padding_vertical:.1f}px, "
                 f"Text area X={text_area_start_x:.1f}-{text_area_end_x:.1f}px, "
                 f"Start Y={start_y:.1f}px"
             )
@@ -580,9 +756,22 @@ class FrameGeneratorV11:
                         else:
                             # Word is too wide, but still left-align it
                             current_x = text_area_start_x
+                    
+                    # CRITICAL: Convert to int for pixel coordinates
+                    x_coord = int(round(current_x))
+                    y_coord = int(round(current_y))
+                    
                     # CRITICAL: Always add layout coordinates for every word
                     # Use (line_idx, word_idx) as key to match rendering lookup
-                    layouts[slide_index][(line_idx, i)] = (current_x, current_y)
+                    layouts[slide_index][(line_idx, i)] = (x_coord, y_coord)
+                    
+                    # Debug first few words to verify coordinates
+                    if slide_index < 2 and line_idx < 2 and i < 3:
+                        logger.debug(
+                            f"Slide {slide_index}, Line {line_idx}, Word {i} ('{word.word}'): "
+                            f"x={x_coord}, y={y_coord}, width={word_width:.1f}"
+                        )
+                    
                     current_x += word_width + space_width
                 
                 # Move to next line (even if it exceeds margin - we want all words to have coordinates)
@@ -623,7 +812,8 @@ class FrameGeneratorV11:
 
         def _word_ends_sentence(word_text: str) -> bool:
             """
-            Check if word ends with a full stop (period).
+            Check if word ends with a full stop (period) that actually ends a sentence.
+            Excludes common abbreviations like Mr., Mrs., Dr., Ms., etc.
             This is used to ensure sentences after full stops ALWAYS start on a new slide.
             Only full stops (periods) are used - no exclamation or question marks.
             """
@@ -638,8 +828,57 @@ class FrameGeneratorV11:
                 cleaned = cleaned[:-1]
             if not cleaned:
                 return False
-            # Check if last character is a full stop (period) ONLY
-            return cleaned[-1] == "."
+            # Check if last character is a full stop (period)
+            if cleaned[-1] != ".":
+                return False
+            
+            # Exclude common abbreviations that end with periods but don't end sentences
+            # Convert to lowercase for case-insensitive matching
+            word_lower = cleaned.lower()
+            
+            # Comprehensive list of common abbreviations that should NOT trigger new lines
+            abbreviations = {
+                # Titles and honorifics
+                'mr.', 'mrs.', 'ms.', 'miss.', 'dr.', 'prof.', 'rev.', 'fr.', 'sr.', 'jr.',
+                'hon.', 'esq.', 'sir.', 'dame.', 'lord.', 'lady.',
+                # Academic and professional
+                'ph.d.', 'm.d.', 'd.d.s.', 'd.v.m.', 'rn.', 'cpa.', 'llc.', 'llp.',
+                # Time and dates
+                'a.m.', 'p.m.', 'am.', 'pm.', 'b.c.', 'a.d.', 'bc.', 'ad.',
+                'jan.', 'feb.', 'mar.', 'apr.', 'may.', 'jun.', 'jul.', 'aug.',
+                'sep.', 'sept.', 'oct.', 'nov.', 'dec.',
+                # Common words
+                'vs.', 'v.', 'etc.', 'e.g.', 'i.e.', 'viz.', 'cf.', 'ex.', 'et al.',
+                # Business and legal
+                'inc.', 'ltd.', 'corp.', 'co.', 'llc.', 'llp.', 'plc.',
+                # Addresses and locations
+                'st.', 'ave.', 'blvd.', 'rd.', 'dr.', 'ct.', 'ln.', 'pkwy.', 'sq.',
+                'n.', 's.', 'e.', 'w.', 'nw.', 'ne.', 'sw.', 'se.',
+                # Numbers and measurements
+                'no.', 'vol.', 'pp.', 'p.', 'ch.', 'sec.', 'fig.', 'art.',
+                'ft.', 'in.', 'lb.', 'oz.', 'kg.', 'g.', 'ml.', 'l.',
+                # Other common abbreviations
+                'ed.', 'est.', 'approx.', 'min.', 'max.', 'avg.', 'std.',
+                'gov.', 'pres.', 'sen.', 'rep.', 'gen.', 'col.', 'capt.',
+                'dept.', 'univ.', 'assoc.', 'misc.', 'op.', 'cit.'
+            }
+            
+            # Check if this word is a common abbreviation
+            if word_lower in abbreviations:
+                return False
+            
+            # Check if it's a single letter followed by period (like "A." or "I.")
+            # These are often abbreviations or initials, not sentence endings
+            if len(cleaned) == 2 and cleaned[0].isalpha() and cleaned[1] == '.':
+                return False
+            
+            # Check for common patterns like "U.S.", "U.K.", "Ph.D.", etc.
+            if len(cleaned) >= 3 and '.' in cleaned[:-1]:
+                # Has period in middle (like "U.S." or "Ph.D.")
+                return False
+            
+            # It's a period that ends a sentence (not an abbreviation)
+            return True
 
         last_word_text = None
         sentence_just_ended = False  # Track if we just finished a sentence
@@ -751,12 +990,15 @@ class FrameGeneratorV11:
                     
                     # CRITICAL: If previous word ended a sentence, we MUST start a new slide
                     # This ensures new sentences ALWAYS start on a new slide, regardless of word/line limits
+                    # CRITICAL: If previous word ended a sentence, we MUST start a new slide
+                    # Words after a full stop MUST ALWAYS start on a new slide
                     if sentence_just_ended:
                         # Previous word ended a sentence - finish current slide if it has words
                         # CRITICAL: After a full stop, the next sentence MUST start on a completely fresh slide
                         if current_slide_words_ts:
                             # Finish the current slide (don't include the current word yet)
                             # Do NOT carry over remaining words - sentence boundaries are absolute
+                            logger.info(f"Starting new slide after sentence boundary. Word '{word_ts.word}' at {word_ts.start}s starts new sentence on new slide.")
                             build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
                         
                         # ALWAYS start a completely new slide for the new sentence
@@ -777,12 +1019,14 @@ class FrameGeneratorV11:
                     if segment not in current_slide_segments:
                         current_slide_segments.append(segment)
 
-                    # Check if current word ends a sentence - if so, finish this slide immediately
+                    # CRITICAL: Check if current word ends a sentence - if so, finish this slide immediately
                     # This takes priority over word/line limits - sentence boundaries are absolute
+                    # Words after a full stop MUST ALWAYS start on a new slide
                     if _word_ends_sentence(word_text):
                         # Finish this slide now - the next sentence will ALWAYS start on a new slide
                         # CRITICAL: Do NOT carry over any remaining words to the next slide
                         # After a full stop, the next sentence MUST start on a completely fresh slide
+                        logger.info(f"Word '{word_text}' ends sentence at {word_ts.start}s - finishing current slide. Next word will start new slide.")
                         build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
                         
                         # ALWAYS start a completely new slide for the next sentence
@@ -798,33 +1042,94 @@ class FrameGeneratorV11:
 
                     last_word_text = word_text
 
-                    # Check word/line limit (only if we haven't already finished the slide)
-                    # CRITICAL: For reels, we need to check if slide is full based on lines, not just word count
-                    # Build a test layout to see if current words fit
+                    # CRITICAL: Check limits BEFORE testing layout - enforce strict 12 words and 3 lines
+                    # Check word count limit first (strict enforcement)
+                    if len(current_slide_words_ts) > MAX_WORDS_PER_SLIDE:
+                        # Word limit exceeded - move the overflowing word to the next slide
+                        overflow_word = current_slide_words_ts.pop()
+                        words_added_to_slides.discard(id(overflow_word))
+                        
+                        logger.debug(f"Word limit exceeded ({MAX_WORDS_PER_SLIDE} words). Moving '{overflow_word.word}' to next slide.")
+                        
+                        # Finalize current slide without the overflow word
+                        build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
+                        
+                        # Start new slide with the overflow word
+                        current_slide_words_ts = [overflow_word]
+                        words_added_to_slides.add(id(overflow_word))
+                        current_slide_segments = [segment] if segment not in current_slide_segments else current_slide_segments
+                        current_slide_start_time = overflow_word.start
+                        continue
+                    
+                    # Check word/line limit by testing layout (only if we haven't already finished the slide)
+                    # Build a test layout to see if current words fit within 3 lines and 12 words
                     if current_slide_words_ts:
-                        # Test if adding this word would exceed limits
-                        test_words = current_slide_words_ts + [word_ts]  # Include current word in test
+                        # Test if adding this word would exceed limits (12 words or 3 lines)
+                        test_words = list(current_slide_words_ts)  # copy current words including the newly added one
+                        
+                        # CRITICAL: Save current slide count before test
+                        slides_count_before_test = len(slides)
+                        layouts_count_before_test = len(layouts)
+                        slide_start_times_count_before_test = len(slide_start_times)
+                        
                         test_remaining, _ = build_slide_layout(test_words, current_slide_segments, current_slide_start_time)
                         
-                        # If there are remaining words after building, the slide is full
+                        # CRITICAL: If a test slide was created, remove it (it was just for testing)
+                        if len(slides) > slides_count_before_test:
+                            # Remove the test slide that was created
+                            test_slide_index = len(slides) - 1  # Index of the test slide (last one)
+                            slides.pop()  # Remove last slide (the test slide)
+                            
+                            # Remove the test layout entry if it exists
+                            if test_slide_index in layouts:
+                                del layouts[test_slide_index]
+                            
+                            # Remove the test slide start time if it exists
+                            if len(slide_start_times) > slide_start_times_count_before_test:
+                                slide_start_times.pop()  # Remove test slide start time
+                        
+                        # If there are remaining words after building, the slide is full (hit 12 words or 3 lines limit)
                         if test_remaining:
-                            # Current slide is full - finalize it with words that fit
-                            # Remove the last word we just added (it will go to next slide)
-                            current_slide_words_ts.pop()  # Remove the word we just added
-                            words_added_to_slides.discard(id(word_ts))  # Unmark it
+                            # Determine how many words actually fit in the previous slide
+                            remaining_count = len(test_remaining)
+                            words_that_fit_count = len(test_words) - remaining_count
+                            if words_that_fit_count < 0:
+                                words_that_fit_count = 0
+                            words_that_fit = test_words[:words_that_fit_count]
                             
-                            # Finalize current slide
-                            build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
+                            logger.debug(
+                                f"Slide full: {len(words_that_fit)} words fit, {remaining_count} words remain for next slide"
+                            )
                             
-                            # Start new slide with the word that didn't fit
-                            current_slide_words_ts = [word_ts]
-                            words_added_to_slides.add(id(word_ts))  # Re-mark it
-                            current_slide_segments = [segment] if segment not in current_slide_segments else current_slide_segments
-                            current_slide_start_time = word_ts.start
+                            # Remove words that moved to the next slide from the tracking set
+                            for rem_word in test_remaining:
+                                words_added_to_slides.discard(id(rem_word))
+                            
+                            # Finalize current slide with the words that fit
+                            if words_that_fit:
+                                build_slide_layout(words_that_fit, current_slide_segments, current_slide_start_time)
+                            else:
+                                logger.warning(
+                                    f"No words fit in slide after capacity test. Remaining words: {remaining_count}"
+                                )
+                            
+                            # Prepare next slide with the remaining words
+                            current_slide_words_ts = list(test_remaining)
+                            for rem_word in test_remaining:
+                                words_added_to_slides.add(id(rem_word))
+                            current_slide_segments = (
+                                [segment] if segment not in current_slide_segments else current_slide_segments
+                            )
+                            current_slide_start_time = (
+                                test_remaining[0].start if test_remaining else word_ts.start
+                            )
                         # If no remaining words, the word fits - keep it in current slide
                         # (word is already added above, so we continue)
-                    elif len(current_slide_words_ts) >= MAX_WORDS_PER_SLIDE:
+                    elif len(current_slide_words_ts) > MAX_WORDS_PER_SLIDE:
                         # Fallback: word count limit (shouldn't happen often with line-based checking)
+                        overflow_word = current_slide_words_ts.pop()
+                        words_added_to_slides.discard(id(overflow_word))
+                        
                         remaining, _ = build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
                         if remaining:
                             current_slide_words_ts = remaining
@@ -839,6 +1144,11 @@ class FrameGeneratorV11:
                             current_slide_words_ts = []
                             current_slide_segments = []
                             current_slide_start_time = -1
+                        
+                        current_slide_words_ts = [overflow_word]
+                        words_added_to_slides.add(id(overflow_word))
+                        current_slide_segments = [segment] if segment not in current_slide_segments else current_slide_segments
+                        current_slide_start_time = overflow_word.start
 
         # --- Handle the VERY LAST slide after the loop finishes ---
         # Keep processing remaining words until all are added
@@ -910,7 +1220,447 @@ class FrameGeneratorV11:
             logger.info(f"✓ All {total_words} words successfully added to slides (verified: {words_in_slide_structures} in structures).")
 
         logger.info(f"Grouped slide building complete. Created {len(slides)} slides.")
-        return slides, layouts, slide_start_times
+        
+        # CRITICAL: Post-process slides to fill space better across slide boundaries
+        # Move words from next slide's first line to current slide's last line if they fit
+        logger.info("Post-processing slides to optimize space usage across slide boundaries...")
+        slides, layouts, slide_start_times = self._optimize_slide_boundaries(slides, layouts, slide_start_times)
+        
+        # Recompute slide end times after optimization to ensure accuracy
+        slide_end_times = []
+        for slide_idx, slide_lines in enumerate(slides):
+            slide_end_time = slide_start_times[slide_idx] if slide_idx < len(slide_start_times) else 0.0
+            for line in reversed(slide_lines):
+                if line:
+                    slide_end_time = line[-1].end
+                    break
+            slide_end_times.append(slide_end_time)
+        
+        return slides, layouts, slide_start_times, slide_end_times
+    
+    def _optimize_slide_boundaries(self, slides: List[List[List[WordTimestamp]]], layouts: Dict[int, Dict[int, Tuple[int, int]]], slide_start_times: List[float]) -> Tuple[List[List[List[WordTimestamp]]], Dict[int, Dict[int, Tuple[int, int]]], List[float]]:
+        """
+        Optimize slide boundaries by moving words from next slide to fill current slide's last line.
+        CRITICAL: Never moves words across sentence boundaries (after full stops).
+        Only optimizes within the same sentence.
+        
+        Args:
+            slides: List of slides (each slide is a list of lines, each line is a list of words)
+            layouts: Dictionary of slide layouts
+            slide_start_times: List of slide start times
+            
+        Returns:
+            Optimized (slides, layouts, slide_start_times)
+        """
+        if len(slides) < 2:
+            return slides, layouts, slide_start_times
+        
+        dummy_img = Image.new("RGB", (self.bg_width, self.bg_height))
+        draw = ImageDraw.Draw(dummy_img)
+        space_bbox = draw.textbbox((0, 0), " ", font=self.bold_font)
+        space_width = space_bbox[2] - space_bbox[0]
+        
+        # Helper function to check if a word ends a sentence
+        def _word_ends_sentence(word_text: str) -> bool:
+            """Check if word ends with a full stop (sentence ending)."""
+            if not word_text:
+                return False
+            cleaned = word_text.strip()
+            if not cleaned:
+                return False
+            # Remove trailing quotes, brackets, etc. but keep periods
+            while cleaned and cleaned[-1] in {"'", '"', '"', '"', "'", ")", "]", "}", " "}:
+                cleaned = cleaned[:-1]
+            if not cleaned or cleaned[-1] != ".":
+                return False
+            # Check for abbreviations (same logic as main function)
+            word_lower = cleaned.lower()
+            abbreviations = {
+                'mr.', 'mrs.', 'ms.', 'miss.', 'dr.', 'prof.', 'rev.', 'fr.', 'sr.', 'jr.',
+                'hon.', 'esq.', 'sir.', 'dame.', 'lord.', 'lady.', 'ph.d.', 'm.d.', 'd.d.s.', 'd.v.m.',
+                'rn.', 'cpa.', 'llc.', 'llp.', 'a.m.', 'p.m.', 'am.', 'pm.', 'b.c.', 'a.d.', 'bc.', 'ad.',
+                'jan.', 'feb.', 'mar.', 'apr.', 'may.', 'jun.', 'jul.', 'aug.', 'sep.', 'sept.', 'oct.', 'nov.', 'dec.',
+                'vs.', 'v.', 'etc.', 'e.g.', 'i.e.', 'viz.', 'cf.', 'ex.', 'et al.', 'inc.', 'ltd.', 'corp.', 'co.',
+                'st.', 'ave.', 'blvd.', 'rd.', 'ct.', 'ln.', 'pkwy.', 'sq.', 'n.', 's.', 'e.', 'w.', 'nw.', 'ne.', 'sw.', 'se.',
+                'no.', 'vol.', 'pp.', 'p.', 'ch.', 'sec.', 'fig.', 'art.', 'ft.', 'in.', 'lb.', 'oz.', 'kg.', 'g.', 'ml.', 'l.',
+                'ed.', 'est.', 'approx.', 'min.', 'max.', 'avg.', 'std.', 'gov.', 'pres.', 'sen.', 'rep.', 'gen.', 'col.', 'capt.',
+                'dept.', 'univ.', 'assoc.', 'misc.', 'op.', 'cit.'
+            }
+            if word_lower in abbreviations or (len(cleaned) == 2 and cleaned[0].isalpha() and cleaned[1] == '.'):
+                return False
+            if len(cleaned) >= 3 and '.' in cleaned[:-1]:
+                return False
+            return True
+        
+        # Work with a copy to avoid modifying original during iteration
+        working_slides = [list(slide) for slide in slides]  # Deep copy of slide structure
+        working_layouts = dict(layouts)
+        working_start_times = list(slide_start_times)
+        
+        i = 0
+        optimization_count = 0
+        skipped_count = 0
+        
+        while i < len(working_slides) - 1:
+            current_slide = working_slides[i]
+            next_slide = working_slides[i + 1]
+            
+            # Only optimize if both slides have content
+            if not current_slide or not next_slide:
+                logger.debug(f"Skipping optimization for slide {i}: current_slide={bool(current_slide)}, next_slide={bool(next_slide)}")
+                i += 1
+                continue
+            
+            current_last_line = current_slide[-1] if current_slide else []
+            next_first_line = next_slide[0] if next_slide else []
+            
+            if not current_last_line or not next_first_line:
+                logger.debug(f"Skipping optimization for slide {i}: current_last_line={bool(current_last_line)}, next_first_line={bool(next_first_line)}")
+                i += 1
+                continue
+            
+            # CRITICAL: Check if current slide ends with a full stop (sentence boundary)
+            # If so, NEVER move words from next slide - it starts a new sentence
+            current_slide_ends_with_period = False
+            if current_last_line:
+                last_word = current_last_line[-1] if current_last_line else None
+                if last_word and _word_ends_sentence(last_word.word):
+                    current_slide_ends_with_period = True
+                    logger.debug(f"Slide {i} ends with full stop (word: '{last_word.word}') - skipping optimization to preserve sentence boundary")
+                    skipped_count += 1
+                    i += 1
+                    continue  # Skip optimization - preserve sentence boundary
+            
+            
+            # Check if we can move words from next slide to current slide's last line
+            # Calculate current line width to see how much space is available
+            current_line_text = " ".join(w.word for w in current_last_line)
+            current_line_bbox = draw.textbbox((0, 0), current_line_text, font=self.bold_font)
+            current_line_width = current_line_bbox[2] - current_line_bbox[0]
+            available_space = self.max_text_width - current_line_width
+            
+            logger.debug(f"Slide {i}: Current last line width: {current_line_width:.1f}px, Max width: {self.max_text_width:.1f}px, Available: {available_space:.1f}px")
+            
+            # Check if last line has only one word - if so, be more aggressive
+            last_line_has_one_word = len(current_last_line) == 1
+            if last_line_has_one_word:
+                logger.debug(f"Slide {i}: Last line has only one word - using aggressive optimization")
+            
+            # Collect ALL words from next slide that are from the same sentence
+            # Check multiple lines, not just the first line
+            next_slide_words_same_sentence = []
+            for line_idx, line in enumerate(next_slide):
+                for word in line:
+                    # Stop if we hit a sentence boundary (word ends with period)
+                    if _word_ends_sentence(word.word):
+                        # Include this word if it's the last word of the sentence
+                        next_slide_words_same_sentence.append(word)
+                        break
+                    next_slide_words_same_sentence.append(word)
+                # If we hit a sentence boundary, stop collecting
+                if line and _word_ends_sentence(line[-1].word):
+                    break
+            
+            # Try moving words one by one from next slide (from same sentence)
+            words_moved = 0
+            threshold = 0.99  # Default threshold
+            if last_line_has_one_word:
+                # If last line has only one word, be more aggressive - allow up to 100% (or even slightly over)
+                threshold = 1.0
+                logger.debug(f"Slide {i}: Using aggressive threshold (100%) to fill single-word line")
+            
+            for word_idx in range(len(next_slide_words_same_sentence)):
+                test_line = current_last_line + next_slide_words_same_sentence[:word_idx + 1]
+                line_text = " ".join(w.word for w in test_line)
+                line_bbox = draw.textbbox((0, 0), line_text, font=self.bold_font)
+                test_line_width = line_bbox[2] - line_bbox[0]
+                
+                # Use threshold (99% normally, 100% if last line has only one word)
+                if test_line_width <= self.max_text_width * threshold:
+                    words_moved = word_idx + 1
+                else:
+                    break
+            
+            # If we can move words, do it
+            if words_moved > 0:
+                logger.info(f"Slide {i}: Moving {words_moved} word(s) from slide {i+1} to fill space on slide {i}")
+                optimization_count += 1
+                
+                # Move words from next slide to current slide
+                words_to_move = next_slide_words_same_sentence[:words_moved]
+                
+                # CRITICAL: Verify all words to move actually exist in next slide
+                next_slide_all_words = [w for line in working_slides[i + 1] for w in line]
+                words_to_move_ids = {id(w) for w in words_to_move}
+                next_slide_word_ids = {id(w) for w in next_slide_all_words}
+                missing_from_next = words_to_move_ids - next_slide_word_ids
+                if missing_from_next:
+                    logger.error(
+                        f"CRITICAL: Trying to move {len(missing_from_next)} words that don't exist in slide {i+1}! "
+                        f"Words: {[w.word for w in words_to_move if id(w) in missing_from_next]}"
+                    )
+                
+                working_slides[i][-1] = current_last_line + words_to_move
+                
+                # Update next slide - remove moved words from all lines
+                # Track which words we've moved
+                words_moved_set = {id(w) for w in words_to_move}
+                
+                # Remove moved words from next slide
+                # CRITICAL: Keep track of which lines become empty to detect missing words
+                new_next_slide = []
+                lines_removed = 0
+                for line_idx, line in enumerate(working_slides[i + 1]):
+                    new_line = [w for w in line if id(w) not in words_moved_set]
+                    if new_line:  # Only keep non-empty lines
+                        new_next_slide.append(new_line)
+                    else:
+                        # Line became empty - log it for debugging
+                        logger.warning(
+                            f"Slide {i+1}, Line {line_idx} became empty after moving {len(line)} words. "
+                            f"Original line had: {[w.word for w in line]}"
+                        )
+                        lines_removed += 1
+                
+                if lines_removed > 0:
+                    logger.warning(f"Slide {i+1}: {lines_removed} line(s) became empty during optimization")
+                
+                # Update next slide
+                if new_next_slide:
+                    working_slides[i + 1] = new_next_slide
+                else:
+                    # Next slide is now empty
+                    working_slides[i + 1] = []
+                
+                # Rebuild layouts for affected slides
+                # Extract all words from current slide (ensure no duplicates)
+                current_slide_words = []
+                seen_word_ids = set()
+                for line in working_slides[i]:
+                    for word in line:
+                        word_id = id(word)
+                        if word_id not in seen_word_ids:
+                            current_slide_words.append(word)
+                            seen_word_ids.add(word_id)
+                
+                # Rebuild current slide layout
+                if current_slide_words:
+                    working_slides[i], working_layouts[i] = self._rebuild_slide_layout(
+                        current_slide_words, i, working_start_times[i]
+                    )
+                
+                # Rebuild next slide layout if it still has content
+                if working_slides[i + 1]:
+                    next_slide_words = []
+                    seen_word_ids = set()
+                    for line in working_slides[i + 1]:
+                        for word in line:
+                            word_id = id(word)
+                            if word_id not in seen_word_ids:
+                                next_slide_words.append(word)
+                                seen_word_ids.add(word_id)
+                    
+                    if next_slide_words:
+                        working_slides[i + 1], working_layouts[i + 1] = self._rebuild_slide_layout(
+                            next_slide_words, i + 1, working_start_times[i + 1]
+                        )
+                    else:
+                        # Next slide is now empty - remove it
+                        working_slides.pop(i + 1)
+                        working_layouts.pop(i + 1, None)
+                        if i + 1 < len(working_start_times):
+                            working_start_times.pop(i + 1)
+                        logger.info(f"Slide {i}: Moved {words_moved} word(s) from slide {i+1} to slide {i}, removed empty slide")
+                        continue  # Don't increment i, check same position again
+                
+                logger.info(f"Slide {i}: Moved {words_moved} word(s) from slide {i+1} to slide {i}")
+            else:
+                logger.debug(f"Slide {i}: No words can be moved (tested {len(next_first_line)} words, none fit)")
+            
+            i += 1
+        
+        logger.info(f"Slide optimization complete: {optimization_count} optimizations performed, {skipped_count} skipped due to sentence boundaries")
+        
+        # Filter out any empty slides that might remain
+        final_slides = []
+        final_layouts = {}
+        final_start_times = []
+        
+        # Track all words to ensure none are lost
+        # Structure: slides -> lines -> words (WordTimestamp objects)
+        original_word_count = sum(len(line) for slide in slides for line in slide)
+        final_word_count = 0
+        
+        for idx, slide in enumerate(working_slides):
+            if slide:  # Only include non-empty slides
+                final_slides.append(slide)
+                final_layouts[len(final_slides) - 1] = working_layouts.get(idx, {})
+                if idx < len(working_start_times):
+                    final_start_times.append(working_start_times[idx])
+                # Count words in this slide (each line is a list of WordTimestamp objects)
+                for line in slide:
+                    final_word_count += len(line)
+        
+        # CRITICAL: Verify no words were lost
+        if final_word_count != original_word_count:
+            logger.error(f"CRITICAL: Word count mismatch during optimization! Original: {original_word_count}, Final: {final_word_count}")
+            logger.error(f"Lost {original_word_count - final_word_count} words during slide optimization!")
+            # Return original slides if words were lost
+            logger.warning("Returning original slides to prevent word loss")
+            return slides, layouts, slide_start_times
+        else:
+            logger.info(f"Optimized slide boundaries: {len(slides)} slides -> {len(final_slides)} slides (all {original_word_count} words preserved)")
+        
+        return final_slides, final_layouts, final_start_times
+    
+    def _rebuild_slide_layout(self, words: List[WordTimestamp], slide_index: int, start_time: float) -> Tuple[List[List[WordTimestamp]], Dict[int, Tuple[int, int]]]:
+        """
+        Rebuild layout for a slide given its words.
+        This is a helper for _optimize_slide_boundaries.
+        Uses the SAME centering/padding logic as the original build_slide_layout.
+        """
+        dummy_img = Image.new("RGB", (self.bg_width, self.bg_height))
+        draw = ImageDraw.Draw(dummy_img)
+        space_bbox = draw.textbbox((0, 0), " ", font=self.bold_font)
+        space_width = space_bbox[2] - space_bbox[0]
+        
+        # Build lines (same logic as original, but with aggressive threshold to prevent single-word last lines)
+        lines = []
+        current_line = []
+        
+        for word in words:
+            if current_line:
+                test_line = current_line + [word]
+                line_text = " ".join(w.word for w in test_line)
+                line_bbox = draw.textbbox((0, 0), line_text, font=self.bold_font)
+                test_line_width = line_bbox[2] - line_bbox[0]
+                
+                # Use 99% threshold (same as optimization)
+                # But if this would create a last line with only one word, be more aggressive
+                would_create_single_word_line = len(current_line) == 1 and word == words[-1]
+                threshold = 1.0 if would_create_single_word_line else 0.99
+                
+                if test_line_width > self.max_text_width * threshold:
+                    lines.append(current_line)
+                    current_line = [word]
+                else:
+                    current_line.append(word)
+            else:
+                current_line.append(word)
+        
+        if current_line:
+            lines.append(current_line)
+            
+            # CRITICAL: If last line has only one word, try to move a word from the previous line
+            if len(lines) >= 2 and len(current_line) == 1:
+                prev_line = lines[-2]
+                if len(prev_line) > 1:  # Previous line has multiple words
+                    # Try moving last word from previous line to last line
+                    test_line = [prev_line[-1]] + current_line
+                    line_text = " ".join(w.word for w in test_line)
+                    line_bbox = draw.textbbox((0, 0), line_text, font=self.bold_font)
+                    test_line_width = line_bbox[2] - line_bbox[0]
+                    
+                    if test_line_width <= self.max_text_width * 1.0:  # Allow up to 100%
+                        # Move the word
+                        moved_word = prev_line.pop()
+                        current_line.insert(0, moved_word)
+                        logger.debug(f"Rebuild: Moved word '{moved_word.word}' from previous line to fill single-word last line")
+        
+        # Build layout using SAME centering logic as original build_slide_layout
+        layout = {}
+        
+        # Step 1: Calculate actual content dimensions (bounding box) - SAME AS ORIGINAL
+        max_line_width = 0
+        for line_of_words in lines:
+            if not line_of_words:
+                continue
+            line_text = " ".join(w.word for w in line_of_words)
+            line_bbox = draw.textbbox((0, 0), line_text, font=self.bold_font)
+            line_width = line_bbox[2] - line_bbox[0]
+            max_line_width = max(max_line_width, line_width)
+        
+        content_width = max_line_width
+        content_height = len(lines) * self.line_height
+        
+        # Step 2: Use the fixed margins defined at class level - SAME AS ORIGINAL
+        min_margin_top = self.top_margin
+        min_margin_bottom = self.bottom_margin
+        min_margin_left = self.left_margin
+        min_margin_right = self.right_margin
+        
+        # Step 3: Calculate available space (screen - margins)
+        available_width = self.bg_width - min_margin_left - min_margin_right
+        available_height = self.bg_height - min_margin_top - min_margin_bottom
+        
+        # Step 4: Fixed 150px left padding - text area starts at exactly 150px from left
+        # NO dynamic horizontal padding - left side is fixed at 150px (same as build_slide_layout)
+        text_area_start_x = 150  # Fixed 150px left padding - never changes
+        text_area_end_x = self.bg_width - min_margin_right  # Right boundary uses right margin
+        text_area_width = text_area_end_x - text_area_start_x
+        
+        # Step 5: Calculate vertical padding (only vertical centering, horizontal is fixed)
+        padding_vertical = max(0, (available_height - content_height) / 2)
+        
+        # Vertical positioning - centered with equal padding - SAME AS ORIGINAL
+        start_y = min_margin_top + padding_vertical
+        max_y = self.bg_height - min_margin_bottom - padding_vertical
+        
+        # Ensure text doesn't exceed bounds (safety check)
+        if start_y + content_height > max_y:
+            start_y = min_margin_top
+            logger.warning(f"Slide {slide_index}: Content height exceeds available space, using minimum top margin")
+        
+        current_y = start_y
+        max_x = text_area_end_x
+        
+        # Position words using SAME logic as original
+        for line_idx, line_of_words in enumerate(lines):
+            if len(line_of_words) == 0:
+                current_y += self.line_height
+                continue
+            
+            # Calculate total width of all words (with spaces) - SAME AS ORIGINAL
+            word_widths = []
+            total_words_width = 0
+            for word in line_of_words:
+                word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font)
+                word_width = word_bbox[2] - word_bbox[0]
+                word_widths.append(word_width)
+                total_words_width += word_width
+            
+            # Add space widths between words
+            if len(line_of_words) > 1:
+                total_words_width += (len(line_of_words) - 1) * space_width
+            
+            # Text alignment: center for reels, left for main videos - SAME AS ORIGINAL
+            if hasattr(self, 'text_align') and self.text_align == "center":
+                current_x = text_area_start_x + (text_area_width - total_words_width) // 2
+            else:
+                current_x = text_area_start_x
+            
+            # Store positions for each word - SAME AS ORIGINAL
+            for i, word in enumerate(line_of_words):
+                word_width = word_widths[i]
+                # Ensure word fits - adjust position if needed
+                if current_x + word_width > max_x:
+                    adjusted_x = max(text_area_start_x, max_x - word_width)
+                    if adjusted_x + word_width <= max_x:
+                        current_x = adjusted_x
+                    else:
+                        current_x = text_area_start_x
+                
+                # CRITICAL: Convert to int for pixel coordinates
+                x_coord = int(round(current_x))
+                y_coord = int(round(current_y))
+                
+                layout[(line_idx, i)] = (x_coord, y_coord)
+                current_x += word_width + space_width
+            
+            current_y += self.line_height
+        
+        return lines, layout
+    
     def make_frame_function(self, slide_index: int, slide_start_time: float):
         def generate_frame(t_local: float) -> np.ndarray:
             global_t = slide_start_time + t_local
@@ -1140,6 +1890,7 @@ def _calculate_frame_timestamps(duration: float, fps: int, word_timestamps: Opti
 def _map_frames_to_slides(
     frame_timestamps: List[Tuple[int, float]],
     slide_start_times: List[float],
+    slide_end_times: List[float],
     audio_duration: float
 ) -> List[Tuple[int, float, int, float]]:
     """
@@ -1152,20 +1903,49 @@ def _map_frames_to_slides(
     
     for frame_num, timestamp in frame_timestamps:
         # Find which slide this frame belongs to
-        # Use the last slide whose start time is <= current timestamp
-        slide_index = 0
-        slide_start = slide_start_times[0] if slide_start_times else 0.0
+        # CRITICAL: Iterate backwards to find the correct slide at boundaries
+        # This ensures we select the new slide when at a transition boundary, not the old one
+        slide_index = len(slide_start_times) - 1  # Default to last slide
+        slide_start = slide_start_times[slide_index] if slide_start_times else 0.0
         
         # Find the correct slide for this timestamp
-        # A frame belongs to a slide if timestamp >= slide_start_time
-        # We want the latest slide that has started (timestamp >= slide_start_time)
-        for i, slide_start_time in enumerate(slide_start_times):
-            if timestamp >= slide_start_time:
-                slide_index = i
-                slide_start = slide_start_time
-            else:
-                # We've passed the last matching slide, stop searching
+        # CRITICAL: At transition boundaries, we want the NEW slide, not the old one
+        epsilon = 1e-5  # Very small epsilon to handle floating point precision
+        
+        # Find the slide that should be displayed at this timestamp
+        # We iterate forward and select the slide whose start time is <= timestamp
+        # and whose end time is > timestamp (for non-final slides)
+        for i in range(len(slide_start_times)):
+            slide_start_time = slide_start_times[i]
+            slide_end_time = slide_end_times[i] if i < len(slide_end_times) else audio_duration
+            
+            # Check if timestamp is before this slide starts
+            if timestamp < slide_start_time - epsilon:
+                # We've passed all slides that could contain this timestamp
+                # Use the previous slide (i-1) or slide 0 if this is the first slide
+                if i > 0:
+                    slide_index = i - 1
+                    slide_start = slide_start_times[slide_index]
+                else:
+                    slide_index = 0
+                    slide_start = slide_start_times[0] if slide_start_times else 0.0
                 break
+            
+            # Check if timestamp is within this slide's range
+            if i == len(slide_start_times) - 1:
+                # Last slide: extends to end of audio
+                if slide_start_time - epsilon <= timestamp:
+                    slide_index = i
+                    slide_start = slide_start_time
+                    break
+            else:
+                # Non-final slides: timestamp must be < end_time to belong to this slide
+                # At the exact boundary (timestamp >= slide_end_time), we want the NEXT slide
+                if slide_start_time - epsilon <= timestamp < slide_end_time - epsilon:
+                    slide_index = i
+                    slide_start = slide_start_time
+                    break
+                # If timestamp >= slide_end_time, continue to next slide (this slide has ended)
         
         # CRITICAL: Ensure we generate frames for the full audio duration
         # The last slide should persist until the end of audio
@@ -1578,9 +2358,8 @@ def render_video(
     Returns:
         The path to the rendered video.
     """
-    logger.info("--- Starting Video Rendering Pipeline (Batch Processing) ---")
+    logger.info("--- Starting Video Rendering Pipeline (Dynamic Frame Generation) ---")
     
-    temp_frames_dir = None
     temp_bg_path = None
     
     try:
@@ -1614,13 +2393,6 @@ def render_video(
         if bg_image.size != (width, height):
             logger.info(f"Resizing background from {bg_image.size} to ({width}, {height})")
             bg_image = bg_image.resize((width, height), Image.Resampling.LANCZOS)
-            # Save resized image to temporary file
-            temp_bg_path = output_path.parent / f"temp_bg_{output_path.stem}.jpg"
-            bg_image.save(temp_bg_path, "JPEG", quality=95)
-            bg_clip = ImageClip(str(temp_bg_path)).with_duration(audio_duration)
-        else:
-            # Use original image if dimensions match
-            bg_clip = ImageClip(str(background_path)).with_duration(audio_duration)
 
         # Detect if this is for reels (check if background_path was provided and dimensions are vertical)
         is_reels = background_path is not None and background_path != Path(settings.DEFAULT_BACKGROUND)
@@ -1655,211 +2427,278 @@ def render_video(
                 logger.info(f"Last word ends at {last_word_end:.3f}s, audio duration is {audio_duration:.3f}s - alignment looks good")
 
         # ====================================================================
-        # PHASE 1: Pre-calculation
+        # PHASE 1: Direct Video Generation (No Frame Files - Pipe to FFmpeg)
         # ====================================================================
-        logger.info("--- Phase 1: Pre-calculating frame timestamps ---")
-        # CRITICAL: Pass word timestamps to ensure frames are generated for every word
-        # This ensures word-level accuracy and prevents missing words
-        frame_timestamps = _calculate_frame_timestamps(
-            duration=audio_duration, 
-            fps=fps,
-            word_timestamps=frame_gen.all_words  # Pass all words for word-level frame generation
-        )
-        logger.info(f"Calculated {len(frame_timestamps)} frames for {audio_duration:.2f}s video at {fps}fps (word-level timestamps included)")
+        logger.info("--- Phase 1: Setting up direct video generation (piping frames to FFmpeg) ---")
         
-        mapped_frames = _map_frames_to_slides(
-            frame_timestamps,
-            frame_gen.slide_start_times,
-            audio_duration
-        )
-        logger.info(f"Mapped {len(mapped_frames)} frames to {len(frame_gen.slide_start_times)} slides")
+        # CRITICAL: Optimization already ran in _build_grouped_slides, so we use optimized layout
+        # We'll generate frames on-the-fly and pipe directly to FFmpeg (no disk files)
         
-        # Calculate optimal batch size - larger batches reduce overhead
-        cpu_count = os.cpu_count() or 4
-        # Use larger batches to reduce multiprocessing overhead
-        # Target: 200-500 frames per batch for better efficiency
-        batch_size = max(200, len(mapped_frames) // (cpu_count * 2))
-        batches = _create_frame_batches(mapped_frames, batch_size)
-        logger.info(f"Created {len(batches)} batches (batch size: {batch_size}, workers: {cpu_count})")
+        import subprocess
+        import math
+        import io
         
-        # Serialize frame generator data for multiprocessing
-        # Convert WordTimestamp objects to dicts for serialization
-        # Use (line_index, word_index) as unique key to prevent collisions
-        serialized_slides = []
-        serialized_layouts = {}
+        ffmpeg_path = _get_ffmpeg_path()
+        codec, codec_params = _detect_hardware_codec()
         
-        for slide_idx, slide in enumerate(frame_gen.slides):
-            serialized_slide = []
-            serialized_layout = {}
+        # Create a function to generate frame at timestamp
+        def generate_frame_at_timestamp(t: float) -> Image.Image:
+            """
+            Generate a single frame at timestamp t using optimized layout.
+            Returns PIL Image (RGBA) with text overlay on background.
+            """
+            # Find which slide this timestamp belongs to
+            # CRITICAL: At transition boundaries, we want the NEW slide, not the old one
+            slide_index = len(frame_gen.slide_start_times) - 1  # Default to last slide
+            epsilon = 1e-5  # Very small epsilon to handle floating point precision
             
-            # Get the layout for this slide
-            layout = frame_gen.slide_layouts.get(slide_idx, {})
-            
-            for line_idx, line in enumerate(slide):
-                serialized_line = []
-                for word_idx, word in enumerate(line):
-                    # Create unique key: (line_index, word_index)
-                    unique_key = (line_idx, word_idx)
-                    
-                    # Store word data
-                    word_data = {
-                        'word': word.word,
-                        'start': word.start,
-                        'end': word.end
-                    }
-                    serialized_line.append(word_data)
-                    
-                    # Store layout coordinates using unique key (layout uses (line_idx, word_idx) as keys)
-                    if unique_key in layout:
-                        serialized_layout[unique_key] = layout[unique_key]
-                    else:
-                        # CRITICAL: Word doesn't have layout coordinates - add fallback so it's still rendered
-                        logger.warning(f"Layout key {unique_key} not found for word '{word.word}' (start={word.start:.3f}s) in slide {slide_idx} - adding fallback position")
-                        # Calculate approximate fallback position
-                        fallback_x = 80  # Default left margin
-                        fallback_y = 150 + (line_idx * 50)  # Approximate y position based on line
-                        serialized_layout[unique_key] = (fallback_x, fallback_y)
+            # Find the slide that should be displayed at this timestamp
+            # We iterate forward and select the slide whose start time is <= timestamp
+            # and whose end time is > timestamp (for non-final slides)
+            for i in range(len(frame_gen.slide_start_times)):
+                start_time = frame_gen.slide_start_times[i]
+                slide_end_time = frame_gen.slide_end_times[i] if i < len(frame_gen.slide_end_times) else audio_duration
                 
-                serialized_slide.append(serialized_line)
+                # Check if timestamp is before this slide starts
+                if t < start_time - epsilon:
+                    # We've passed all slides that could contain this timestamp
+                    # Use the previous slide (i-1) or slide 0 if this is the first slide
+                    if i > 0:
+                        slide_index = i - 1
+                    else:
+                        slide_index = 0
+                    break
+                
+                # Check if timestamp is within this slide's range
+                if i == len(frame_gen.slide_start_times) - 1:
+                    # Last slide: extends to end of audio
+                    if start_time - epsilon <= t:
+                        slide_index = i
+                        break
+                else:
+                    # Non-final slides: timestamp must be < end_time to belong to this slide
+                    # At the exact boundary (t >= slide_end_time), we want the NEXT slide
+                    if start_time - epsilon <= t < slide_end_time - epsilon:
+                        slide_index = i
+                        break
+                    # If t >= slide_end_time, continue to next slide (this slide has ended)
             
-            serialized_slides.append(serialized_slide)
-            serialized_layouts[slide_idx] = serialized_layout
-        
-        gen_data = {
-            'slides': serialized_slides,
-            'slide_layouts': serialized_layouts,
-            'slide_start_times': frame_gen.slide_start_times,
-            'font_size': frame_gen.font_size,
-            'line_height': frame_gen.line_height,
-            'max_text_width': frame_gen.max_text_width,
-            'left_margin': frame_gen.left_margin,
-            'right_margin': frame_gen.right_margin,
-            'text_align': getattr(frame_gen, 'text_align', 'left')
-        }
-        
-        # ====================================================================
-        # PHASE 2: Parallel Frame Generation
-        # ====================================================================
-        logger.info("--- Phase 2: Generating frames in parallel batches ---")
-        
-        # Create temporary directory for frames
-        temp_frames_dir = Path(tempfile.mkdtemp(prefix="video_frames_"))
-        logger.info(f"Temporary frames directory: {temp_frames_dir}")
-        
-        # Prepare batch data for workers
-        batch_data_list = [
-            (batch, gen_data, temp_frames_dir, width, height)
-            for batch in batches
-        ]
-        
-        # Generate frames in parallel
-        all_frame_files = []
-        num_workers = min(cpu_count, len(batches))
-        
-        logger.info(f"Starting parallel frame generation with {num_workers} workers...")
-        with multiprocessing.Pool(processes=num_workers) as pool:
-            # Use tqdm for progress tracking
-            # Use imap_unordered for better performance, then sort
-            results = list(tqdm(
-                pool.imap_unordered(_generate_frame_batch_worker, batch_data_list),
-                total=len(batches),
-                desc="Generating frames",
-                unit="batch"
-            ))
+            # Ensure slide_index is valid
+            if slide_index < 0:
+                slide_index = 0
+            if slide_index >= len(frame_gen.slides):
+                slide_index = len(frame_gen.slides) - 1
             
-            # Flatten results
-            for batch_files in results:
-                all_frame_files.extend(batch_files)
-        
-        # Sort frame files by frame number (important for video sequence)
-        # Frame files are named: frame_000000.png, frame_000001.png, etc.
-        def get_frame_number(filepath):
-            try:
-                stem = Path(filepath).stem
-                # Extract number from "frame_000000" format
-                return int(stem.split('_')[1])
-            except (IndexError, ValueError):
-                logger.warning(f"Could not extract frame number from {filepath}, using 0")
-                return 0
-        
-        all_frame_files.sort(key=get_frame_number)
-        logger.info(f"Generated {len(all_frame_files)} frames (expected: {len(frame_timestamps)})")
-        
-        # CRITICAL: Verify we generated all expected frames
-        if len(all_frame_files) < len(frame_timestamps):
-            missing = len(frame_timestamps) - len(all_frame_files)
-            logger.error(f"CRITICAL: Missing {missing} frames! Expected {len(frame_timestamps)}, got {len(all_frame_files)}")
-            logger.error("This will cause audio-video sync issues. Check frame generation logic.")
+            # Create frame with background (copy to avoid modifying original)
+            frame = bg_image.copy().convert("RGBA")
+            draw = ImageDraw.Draw(frame)
             
-            # Try to identify which frames are missing
-            generated_frame_nums = {get_frame_number(f) for f in all_frame_files}
-            expected_frame_nums = set(range(len(frame_timestamps)))
-            missing_frame_nums = sorted(expected_frame_nums - generated_frame_nums)
-            if missing_frame_nums:
-                logger.error(f"Missing frame numbers: {missing_frame_nums[:20]}..." if len(missing_frame_nums) > 20 else f"Missing frame numbers: {missing_frame_nums}")
-        elif len(all_frame_files) > len(frame_timestamps):
-            extra = len(all_frame_files) - len(frame_timestamps)
-            logger.warning(f"Generated {extra} extra frames (expected {len(frame_timestamps)}, got {len(all_frame_files)})")
-        else:
-            logger.info(f"✓ All {len(all_frame_files)} frames generated successfully")
-        
-        # CRITICAL: Verify frame sequence is complete and consecutive
-        if all_frame_files:
-            frame_nums = sorted([get_frame_number(f) for f in all_frame_files])
-            # Check for gaps in frame sequence
-            gaps = []
-            for i in range(len(frame_nums) - 1):
-                if frame_nums[i+1] - frame_nums[i] > 1:
-                    gaps.append((frame_nums[i], frame_nums[i+1]))
-            if gaps:
-                logger.error(f"CRITICAL: Found {len(gaps)} gaps in frame sequence: {gaps[:10]}...")
-                logger.error("This will cause frames to be skipped during video playback!")
-            else:
-                logger.info(f"✓ Frame sequence is complete (frames {frame_nums[0]} to {frame_nums[-1]})")
+            slide_lines = frame_gen.slides[slide_index]
+            layout = frame_gen.slide_layouts.get(slide_index, {})
+            max_x = width - frame_gen.right_margin
+            
+            # CRITICAL: Validate slide has lines before rendering
+            if not slide_lines:
+                logger.error(f"Slide {slide_index} has no lines! This should not happen.")
+                return frame
+            
+            # CRITICAL: Log slide structure for debugging
+            total_words_in_slide = sum(len(line) for line in slide_lines)
+            logger.debug(
+                f"Rendering slide {slide_index}: {len(slide_lines)} lines, {total_words_in_slide} words, "
+                f"layout has {len(layout)} entries"
+            )
+            
+            # Render all words in the slide using optimized layout
+            # CRITICAL: Render ALL lines, even if they appear empty
+            for line_idx, line in enumerate(slide_lines):
+                # CRITICAL: Check if line is empty and log it
+                if not line or len(line) == 0:
+                    logger.warning(f"Slide {slide_index}, Line {line_idx} is empty! This may indicate missing words.")
+                    continue  # Skip empty lines but log them
+                
+                for word_idx, word in enumerate(line):
+                    # Use (line_idx, word_idx) as key to match layout keys
+                    coords = layout.get((line_idx, word_idx))
+                    if not coords:
+                        # CRITICAL: Don't skip words without coordinates - render them at fallback position
+                        # This ensures all words are visible even if layout calculation missed them
+                        logger.warning(
+                            f"Word '{word.word}' at line {line_idx}, word {word_idx} not found in layout for slide {slide_index} - "
+                            f"using fallback position"
+                        )
+                        # Fallback position: use left margin and calculate y based on line index
+                        x = frame_gen.left_margin  # Fixed left padding (150px)
+                        y = frame_gen.top_margin + (line_idx * frame_gen.line_height)
+                    else:
+                        x, y = coords
+                    
+                    # Safety check: ensure word doesn't overflow screen
+                    word_bbox = draw.textbbox((0, 0), word.word, font=frame_gen.bold_font)
+                    word_width = word_bbox[2] - word_bbox[0]
+                    
+                    if x + word_width > max_x:
+                        # Adjust position to prevent overflow
+                        x = max(frame_gen.left_margin, max_x - word_width)
+                    
+                    # Word highlighting: bold when spoken, regular before
+                    if t >= word.start and t < word.end:
+                        # Word is currently being spoken - show as bold
+                        font = frame_gen.bold_font
+                        color = settings.TEXT_BOLD_COLOR
+                    elif t >= word.end:
+                        # Word has finished being spoken - keep it bold (already spoken)
+                        font = frame_gen.bold_font
+                        color = settings.TEXT_BOLD_COLOR
+                    else:
+                        # Word hasn't been spoken yet - show as faded/light
+                        font = frame_gen.regular_font
+                        color = settings.TEXT_REGULAR_COLOR
+                    
+                    draw.text((x, y), word.word, font=font, fill=color)
+            
+            return frame
         
         # ====================================================================
-        # PHASE 3: Video Assembly
+        # PHASE 2: Direct FFmpeg Encoding (Pipe Frames - No Disk Files)
         # ====================================================================
-        logger.info("--- Phase 3: Assembling video from frames ---")
-        
-        # Create video clip from frame images
-        # CRITICAL: ImageSequenceClip requires frames to be in order and present
-        # If frames are missing, the video will skip or have sync issues
-        frame_clip = ImageSequenceClip(all_frame_files, fps=fps)
-        
-        # CRITICAL: Ensure video duration exactly matches audio duration
-        # This prevents sync issues where video and audio have different lengths
-        if abs(frame_clip.duration - audio_duration) > 0.1:  # More than 100ms difference
-            logger.warning(f"Frame clip duration ({frame_clip.duration:.3f}s) doesn't match audio duration ({audio_duration:.3f}s)")
-            logger.info(f"Adjusting frame clip duration to match audio exactly")
-            frame_clip = frame_clip.with_duration(audio_duration)
-        
-        # Ensure background clip duration matches audio exactly
-        if abs(bg_clip.duration - audio_duration) > 0.1:
-            logger.warning(f"Background clip duration ({bg_clip.duration:.3f}s) doesn't match audio duration ({audio_duration:.3f}s)")
-            bg_clip = bg_clip.with_duration(audio_duration)
-        
-        # Composite with background
-        final_video = CompositeVideoClip([bg_clip, frame_clip])
-        
-        # CRITICAL: Set final video duration to exactly match audio
-        # This ensures perfect synchronization
-        final_video = final_video.with_duration(audio_duration)
-        logger.info(f"Final video duration set to {audio_duration:.3f}s (matching audio exactly)")
-        
-        # ====================================================================
-        # PHASE 4: Optimized Encoding (Bypass MoviePy's slow encoding)
-        # ====================================================================
-        logger.info("--- Phase 4: Encoding video ---")
+        logger.info("--- Phase 2: Encoding video directly with FFmpeg (no frame files) ---")
         logger.info(f"Rendering {fps}fps video to: {output_path}")
         
-        # Use direct FFmpeg encoding for much faster performance
-        _encode_video_with_ffmpeg(
-            video_clip=final_video,
-            audio_path=audio_path,
-            output_path=output_path,
-            fps=fps
-        )
+        # Calculate total frames
+        total_frames = math.ceil(audio_duration * fps)
+        frame_interval = 1.0 / fps
+        
+        # Build FFmpeg command to receive frames via pipe
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-f", "image2pipe",
+            "-vcodec", "png",
+            "-r", str(fps),
+            "-i", "-",  # Read from stdin
+            "-i", str(audio_path),  # Audio input
+            "-c:v", codec,
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-shortest",
+            "-r", str(fps)
+        ]
+        cmd.extend(codec_params)
+        cmd.append(str(output_path))
+        
+        logger.info(f"Starting FFmpeg encoding with {codec}...")
+        logger.info(f"Generating {total_frames} frames on-the-fly and piping to FFmpeg...")
+        
+        try:
+            # Start FFmpeg process with stdin pipe
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+            
+            # Generate and pipe frames
+            frames_generated = 0
+            for frame_num in range(total_frames):
+                t = frame_num * frame_interval
+                if t > audio_duration:
+                    t = audio_duration
+                
+                # Generate frame
+                frame_img = generate_frame_at_timestamp(t)
+                
+                # Convert to RGB (FFmpeg handles RGB better via pipe)
+                frame_rgb = frame_img.convert("RGB")
+                
+                # Save frame to BytesIO and pipe to FFmpeg
+                frame_buffer = io.BytesIO()
+                frame_rgb.save(frame_buffer, format="PNG")
+                frame_data = frame_buffer.getvalue()
+                
+                # Write frame to FFmpeg stdin
+                process.stdin.write(frame_data)
+                process.stdin.flush()
+                
+                frames_generated += 1
+                
+                # Progress logging
+                if frame_num % max(1, total_frames // 10) == 0:
+                    progress = (frame_num / total_frames) * 100
+                    logger.info(f"Generated {frame_num}/{total_frames} frames ({progress:.1f}%)")
+            
+            # Close stdin to signal end of input
+            process.stdin.close()
+            
+            # Wait for FFmpeg to finish
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                logger.error(f"FFmpeg encoding failed with return code {process.returncode}")
+                logger.error(f"FFmpeg stderr: {stderr.decode('utf-8', errors='ignore')}")
+                raise subprocess.CalledProcessError(process.returncode, cmd, stderr=stderr)
+            
+            logger.info(f"Successfully generated {frames_generated} frames and encoded video directly")
+            
+        except Exception as e:
+            logger.error(f"Direct video encoding failed: {e}", exc_info=True)
+            # Fallback: try software encoding
+            if codec != "libx264":
+                logger.warning("Hardware encoding failed, trying software fallback...")
+                cmd_software = [
+                    ffmpeg_path,
+                    "-y",
+                    "-f", "image2pipe",
+                    "-vcodec", "png",
+                    "-r", str(fps),
+                    "-i", "-",
+                    "-i", str(audio_path),
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-pix_fmt", "yuv420p",
+                    "-shortest",
+                    "-r", str(fps),
+                    str(output_path)
+                ]
+                
+                process = subprocess.Popen(
+                    cmd_software,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0
+                )
+                
+                for frame_num in range(total_frames):
+                    t = frame_num * frame_interval
+                    if t > audio_duration:
+                        t = audio_duration
+                    
+                    frame_img = generate_frame_at_timestamp(t)
+                    frame_rgb = frame_img.convert("RGB")
+                    
+                    frame_buffer = io.BytesIO()
+                    frame_rgb.save(frame_buffer, format="PNG")
+                    frame_data = frame_buffer.getvalue()
+                    
+                    process.stdin.write(frame_data)
+                    process.stdin.flush()
+                
+                process.stdin.close()
+                stdout, stderr = process.communicate()
+                
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, cmd_software, stderr=stderr)
+                
+                logger.info("Video encoding complete (using software encoder)")
+            else:
+                raise
         
         logger.info("--- Video Rendering Complete ---")
         return output_path
@@ -1870,16 +2709,8 @@ def render_video(
     
     finally:
         # ====================================================================
-        # PHASE 5: Cleanup
+        # PHASE 3: Cleanup
         # ====================================================================
-        if temp_frames_dir and temp_frames_dir.exists():
-            logger.info(f"Cleaning up temporary frames directory: {temp_frames_dir}")
-            try:
-                shutil.rmtree(temp_frames_dir)
-                logger.info("Temporary files cleaned up successfully")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temporary files: {e}")
-        
         # Cleanup temporary background file if created
         if temp_bg_path and temp_bg_path.exists():
             try:

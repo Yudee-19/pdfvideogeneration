@@ -676,6 +676,7 @@ class OpenAIService:
             chunk_audio = audio_path.parent / f"{audio_path.stem}_chunk_{i}.mp3"
             
             # Generate audio for chunk
+            logger.info(f"Job {job_id}: Generating audio chunk {i+1}/{len(chunks)} using OpenAI voice: {self.voice}")
             response = self.client.audio.speech.create(
                 model="gpt-4o-mini-tts",
                 voice=self.voice,
@@ -687,6 +688,7 @@ class OpenAIService:
             
             # Normalize and clean each chunk before concatenation
             # This prevents static noise from level mismatches
+            logger.debug(f"Job {job_id}: Processing chunk {i+1} audio - removing static and normalizing...")
             ffmpeg_path = self._get_ffmpeg_path()
             normalize_cmd = [
                 ffmpeg_path,
@@ -699,6 +701,7 @@ class OpenAIService:
                 str(chunk_audio)
             ]
             subprocess.run(normalize_cmd, check=True, capture_output=True, text=True)
+            logger.debug(f"Job {job_id}: Chunk {i+1} audio processed (static removal and normalization applied)")
             
             # Clean up raw chunk
             if chunk_audio_raw.exists():
