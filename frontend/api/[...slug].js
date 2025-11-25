@@ -159,33 +159,26 @@ export default async function handler(req, res) {
           const fields = {};
           const files = [];
           
-          bb.on('file', (name, file, info) => {
-            const { filename, encoding, mimeType } = info;
-            console.log(`[Proxy] File field: ${name}, filename: ${filename}, mimeType: ${mimeType}`);
-            
-            const chunks = [];
-            file.on('data', (data) => {
-              chunks.push(data);
-            });
-            
-            file.on('end', () => {
-              const buffer = Buffer.concat(chunks);
-              files.push({ name, buffer, filename, mimeType });
-            });
-          });
+          let fileCount = 0;
+          let fieldCount = 0;
+          let completedFiles = 0;
+          let sent = false; // Guard to prevent multiple sends
           
-          bb.on('field', (name, value) => {
-            console.log(`[Proxy] Field: ${name} = ${value}`);
-            fields[name] = value;
-          });
-          
-          bb.on('finish', () => {
+          const sendToBackend = () => {
+            if (sent) {
+              console.log('[Proxy] sendToBackend already called, skipping');
+              return;
+            }
+            sent = true;
+            console.log(`[Proxy] All data collected. Files: ${files.length}, Fields: ${Object.keys(fields).length}`);
+            
             // Reconstruct FormData for backend
             for (const [key, value] of Object.entries(fields)) {
               formData.append(key, value);
             }
             
             for (const file of files) {
+              console.log(`[Proxy] Appending file ${file.name}: ${file.buffer.length} bytes, filename: ${file.filename}`);
               formData.append(file.name, file.buffer, {
                 filename: file.filename,
                 contentType: file.mimeType || 'application/octet-stream'
@@ -195,24 +188,58 @@ export default async function handler(req, res) {
             // Update headers
             delete fetchOptions.headers['content-type'];
             fetchOptions.body = formData;
-            Object.assign(fetchOptions.headers, formData.getHeaders());
+            const formHeaders = formData.getHeaders();
+            console.log('[Proxy] FormData headers:', formHeaders);
+            Object.assign(fetchOptions.headers, formHeaders);
             
             console.log('[Proxy] FormData reconstructed, making backend request...');
+            console.log('[Proxy] Request headers:', fetchOptions.headers);
             
             // Make request to backend
             fetch(fullUrl, fetchOptions)
               .then(async (response) => {
-                await handleResponse(response);
+                console.log(`[Proxy] Backend response: ${response.status} ${response.statusText}`);
+                const responseText = await response.text();
+                console.log('[Proxy] Backend response body:', responseText.substring(0, 500)); // Log first 500 chars
+                
+                // Set response status and headers
+                res.status(response.status);
+                
+                // Copy response headers
+                response.headers.forEach((value, key) => {
+                  const lowerKey = key.toLowerCase();
+                  if (!['connection', 'transfer-encoding', 'content-encoding'].includes(lowerKey)) {
+                    res.setHeader(key, value);
+                  }
+                });
+                
+                // Try to parse as JSON, fallback to text
+                try {
+                  const data = JSON.parse(responseText);
+                  res.json(data);
+                } catch {
+                  res.send(responseText);
+                }
                 resolve();
               })
               .catch(error => {
                 console.error('[Proxy] Backend request error:', error);
+                console.error('[Proxy] Error stack:', error.stack);
                 res.status(500).json({
                   error: 'Proxy error',
                   message: error.message
                 });
                 resolve();
               });
+          };
+          
+          bb.on('finish', () => {
+            console.log('[Proxy] Busboy finished parsing');
+            // sendToBackend will be called when all files and fields are collected
+            // But also check here in case everything was already collected
+            if (completedFiles === fileCount && Object.keys(fields).length === fieldCount) {
+              sendToBackend();
+            }
           });
           
           bb.on('error', (error) => {
