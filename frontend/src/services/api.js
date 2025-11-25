@@ -18,20 +18,29 @@ console.log('Is Vercel:', isVercel);
 
 const api = axios.create({
   baseURL: API_BASE_URL,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  // Don't set default Content-Type - let axios set it based on data type
+  // For FormData, axios will set multipart/form-data with boundary
+  // For JSON, axios will set application/json
   timeout: 10000, // 10 second timeout for most requests
 });
 
 // Add request interceptor for debugging
 api.interceptors.request.use(
   (config) => {
-    console.log(`API Request: ${config.method?.toUpperCase()} ${config.url}`);
+    console.log(`[API] Request: ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
+    console.log(`[API] Full URL: ${config.baseURL}${config.url}`);
+    console.log(`[API] Headers:`, config.headers);
+    if (config.data instanceof FormData) {
+      console.log(`[API] Body is FormData`);
+      // Log FormData entries if possible
+      for (let pair of config.data.entries()) {
+        console.log(`[API] FormData: ${pair[0]} = ${pair[1] instanceof File ? `File(${pair[1].name}, ${pair[1].size} bytes)` : pair[1]}`);
+      }
+    }
     return config;
   },
   (error) => {
-    console.error('API Request Error:', error);
+    console.error('[API] Request Error:', error);
     return Promise.reject(error);
   }
 );
@@ -39,7 +48,7 @@ api.interceptors.request.use(
 // Add response interceptor for debugging
 api.interceptors.response.use(
   (response) => {
-    console.log(`API Response: ${response.status} ${response.config.url}`, response.data);
+    console.log(`[API] Response: ${response.status} ${response.config.url}`, response.data);
     return response;
   },
   (error) => {
@@ -94,10 +103,8 @@ export const uploadPDF = async (file, startPage, endPage, generateSummary = fals
     formData.append('cartesia_model_id', cartesiaModelId);
   }
 
+  // Don't set Content-Type - axios will set it automatically with boundary for FormData
   const response = await api.post('/api/upload', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
     timeout: 60000, // 60 seconds for file upload
   });
   return response.data;
@@ -145,12 +152,10 @@ export const summarizePDF = async (file) => {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await api.post('/api/summarize-pdf', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-    timeout: 300000, // 5 minutes for summarization
-  });
+      // Don't set Content-Type - axios will set it automatically with boundary for FormData
+      const response = await api.post('/api/summarize-pdf', formData, {
+        timeout: 300000, // 5 minutes for summarization
+      });
   return response.data;
 };
 
@@ -168,12 +173,10 @@ export const generateVideoFromText = async (text, voiceProvider = 'openai', open
     formData.append('cartesia_model_id', cartesiaModelId);
   }
 
-  const response = await api.post('/api/generate-video-from-text', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-    timeout: 600000, // 10 minutes for video generation
-  });
+      // Don't set Content-Type - axios will set it automatically with boundary for FormData
+      const response = await api.post('/api/generate-video-from-text', formData, {
+        timeout: 600000, // 10 minutes for video generation
+      });
   return response.data;
 };
 
@@ -191,12 +194,10 @@ export const generateReelsVideo = async (text, voiceProvider = 'openai', openaiV
     formData.append('cartesia_model_id', cartesiaModelId);
   }
 
-  const response = await api.post('/api/generate-reels-video', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-    timeout: 600000, // 10 minutes for video generation
-  });
+      // Don't set Content-Type - axios will set it automatically with boundary for FormData
+      const response = await api.post('/api/generate-reels-video', formData, {
+        timeout: 600000, // 10 minutes for video generation
+      });
   return response.data;
 };
 
