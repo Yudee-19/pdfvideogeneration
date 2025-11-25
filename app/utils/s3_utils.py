@@ -5,7 +5,8 @@ from pathlib import Path
 from botocore.exceptions import NoCredentialsError
 from boto3.s3.transfer import TransferConfig
 from app.config import settings
-
+import json
+from typing import Optional
 logger = logging.getLogger(__name__)
 
 class S3Manager:
@@ -125,6 +126,37 @@ class S3Manager:
             
         except Exception as e:
             logger.error(f"Failed to sync job {job_id} from S3: {e}")
+
+    def generate_presigned_url(self, s3_key: str, expiration=3600):
+        """Generate a temporary URL for direct download from S3."""
+        if not self.s3: return None
+        try:
+            url = self.s3.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': self.bucket_name, 'Key': s3_key},
+                ExpiresIn=expiration
+            )
+            return url
+        except Exception as e:
+            logger.error(f"Error generating presigned URL: {e}")
+            return None
+        
+    def get_job_metadata_from_s3(self, job_id: str) -> Optional[dict]:
+        """
+        Fetches job metadata directly from S3 memory.
+        Used when local files have been cleaned up.
+        """
+        if not self.s3: return None
+        
+        s3_key = f"jobs/{job_id}/job_metadata.json"
+        try:
+            response = self.s3.get_object(Bucket=self.bucket_name, Key=s3_key)
+            json_content = response['Body'].read().decode('utf-8')
+            return json.loads(json_content)
+        except Exception as e:
+            # It's normal to fail if the job hasn't uploaded metadata yet
+            return None
+
 
 # Global instance
 s3_manager = S3Manager()

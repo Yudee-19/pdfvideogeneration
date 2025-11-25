@@ -1306,3 +1306,120 @@ class PipelineService:
             )
             raise
 
+    def run_pipeline_from_audio(
+        self,
+        job_id: str,
+        audio_path: Path
+    ):
+        """
+        Run pipeline starting from a manually uploaded audio file.
+        """
+        job_dir = settings.JOBS_OUTPUT_PATH / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        
+        setup_logging(job_id=job_id, log_level="INFO")
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"=== AUDIO-TO-VIDEO PIPELINE STARTED FOR JOB: {job_id} ===")
+        
+        try:
+            self.job_service.update_job(
+                job_id=job_id,
+                status="processing",
+                message="Processing uploaded audio...",
+                progress=10
+            )
+            
+            # Initialize metadata
+            metadata_path = job_dir / "job_metadata.json"
+            job_metadata = {
+                "job_id": job_id,
+                "source": "manual_audio",
+                "created_at": datetime.now().isoformat(),
+                "original_audio_path": str(audio_path)
+            }
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(job_metadata, f, indent=2)
+
+            # ===== PHASE 1: AUDIO MASTERING =====
+            logger.info("--- AUDIO PROCESSING ---")
+            self.job_service.update_job(
+                job_id=job_id,
+                status="processing",
+                message="Mastering audio quality...",
+                progress=20
+            )
+            
+            processed_audio_path = job_dir / f"{job_id}_processed_audio.mp3"
+            # Use your existing mastering logic
+            processed_audio_path = master_audio(
+                raw_audio_path=audio_path,
+                processed_audio_path=processed_audio_path
+            )
+            
+            # ===== PHASE 2: TRANSCRIPTION (Get Text & Timestamps) =====
+            logger.info("Generating timestamps and text from audio...")
+            self.job_service.update_job(
+                job_id=job_id,
+                status="processing",
+                message="Transcribing audio to generate text and timestamps...",
+                progress=40
+            )
+            
+            from openai import OpenAI
+            openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            
+            with open(processed_audio_path, "rb") as audio_file:
+                transcription = openai_client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="verbose_json",
+                    timestamp_granularities=["word", "segment"]
+                )
+            
+            timestamps_data = transcription.model_dump()
+            timestamps_path = job_dir / f"{job_id}_timestamps.json"
+            with open(timestamps_path, "w", encoding="utf-8") as f:
+                json.dump(timestamps_data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"Transcription complete: {len(timestamps_data.get('words', []))} words")
+            
+            # ===== PHASE 3: VIDEO GENERATION =====
+            logger.info("--- VIDEO GENERATION ---")
+            self.job_service.update_job(
+                job_id=job_id,
+                status="processing",
+                message="Rendering video frames...",
+                progress=60
+            )
+            
+            final_video_path = job_dir / f"{job_id}_final_video.mp4"
+            # Reuse your existing renderer!
+            final_video_path = render_video(
+                audio_path=processed_audio_path,
+                timestamps_path=timestamps_path,
+                output_path=final_video_path
+            )
+            
+            # ===== FINISH =====
+            job_metadata["final_video_path"] = str(final_video_path)
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(job_metadata, f, indent=2)
+                
+            self.job_service.update_job(
+                job_id=job_id,
+                status="completed",
+                message="Video generation completed",
+                progress=100,
+                metadata=job_metadata
+            )
+            
+        except Exception as e:
+            logger.error(f"Pipeline failed: {e}", exc_info=True)
+            self.job_service.update_job(
+                job_id=job_id,
+                status="failed",
+                message=f"Pipeline failed: {str(e)}",
+                metadata={"error": str(e)}
+            )
+            raise

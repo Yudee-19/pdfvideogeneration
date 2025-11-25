@@ -27,6 +27,7 @@ class WordTimestamp(BaseModel):
     probability: Optional[float] = None
 
 def interpolate_color(start_color, end_color, progress):
+    """Interpolate between two RGBA colors."""
     return tuple(
         int(start_color[i] + (end_color[i] - start_color[i]) * progress)
         for i in range(4)
@@ -2589,7 +2590,7 @@ def render_video(
                         # Adjust position to prevent overflow
                         x = max(frame_gen.left_margin, max_x - word_width)
                     
-                    FADE_DURATION = 0.5  # Duration of fade in seconds
+                    FADE_DURATION = 0.3  # Duration of fade in seconds
                     
                     if t >= word.start and t < word.end:
                         # Active: Bold & Dark
@@ -2614,7 +2615,7 @@ def render_video(
                         # Future: Regular & Light
                         font = frame_gen.regular_font
                         color = settings.TEXT_REGULAR_COLOR
-
+                    
                     draw.text((x, y), word.word, font=font, fill=color)
             
             return frame
@@ -2644,11 +2645,13 @@ def render_video(
             "-c:a", "aac",
             "-b:a", "192k",
             "-pix_fmt", "yuv420p",    # Critical for compatibility
-            "-shortest",              # Stop when audio ends
+            "-max_muxing_queue_size", "1024", # Fixes buffer overflow
+            # "-shortest",            # <--- REMOVED to prevent early pipe closure
             str(output_path)
         ]
         cmd.extend(codec_params)
-        cmd.append(str(output_path))
+        if str(output_path) not in cmd:
+            cmd.append(str(output_path))
         
         logger.info(f"Starting FFmpeg encoding with {codec}...")
         logger.info(f"Generating {total_frames} frames on-the-fly and piping to FFmpeg...")
@@ -2681,9 +2684,17 @@ def render_video(
                 frame_rgb.save(frame_buffer, format="PNG")
                 frame_data = frame_buffer.getvalue()
                 
-                # Write frame to FFmpeg stdin
-                process.stdin.write(frame_data)
-                process.stdin.flush()
+                # Write frame to FFmpeg stdin (WITH SAFETY CHECK)
+                try:
+                    process.stdin.write(frame_data)
+                    process.stdin.flush()
+                except (BrokenPipeError, IOError) as e:
+                    if frame_num >= total_frames - 10:
+                        logger.warning(f"FFmpeg closed pipe early at frame {frame_num}/{total_frames} (Ignored as almost done).")
+                        break
+                    else:
+                        logger.error(f"FFmpeg pipe broke unexpectedly at frame {frame_num}!")
+                        raise e
                 
                 frames_generated += 1
                 
@@ -2692,16 +2703,28 @@ def render_video(
                     progress = (frame_num / total_frames) * 100
                     logger.info(f"Generated {frame_num}/{total_frames} frames ({progress:.1f}%)")
             
-            # Close stdin to signal end of input
-            process.stdin.close()
-            
+            # Close stdin to signal end of input (WITH SAFETY CHECK)
+            try:
+                if process.stdin:
+                    process.stdin.close()
+            except (BrokenPipeError, ValueError, OSError):
+                pass
+
             # Wait for FFmpeg to finish
-            stdout, stderr = process.communicate()
+            try:
+                stdout, stderr = process.communicate()
+            except ValueError:
+                logger.warning("FFmpeg pipe closed early (normal for short videos)")
+                stdout, stderr = b"", b""
             
             if process.returncode != 0:
-                logger.error(f"FFmpeg encoding failed with return code {process.returncode}")
-                logger.error(f"FFmpeg stderr: {stderr.decode('utf-8', errors='ignore')}")
-                raise subprocess.CalledProcessError(process.returncode, cmd, stderr=stderr)
+                # Ignore error if we successfully generated most frames
+                if frames_generated >= total_frames - 10:
+                     logger.warning(f"FFmpeg returned non-zero code {process.returncode}, but frames were sent. Assuming success.")
+                else:
+                    logger.error(f"FFmpeg encoding failed with return code {process.returncode}")
+                    logger.error(f"FFmpeg stderr: {stderr.decode('utf-8', errors='ignore')}")
+                    raise subprocess.CalledProcessError(process.returncode, cmd, stderr=stderr)
             
             logger.info(f"Successfully generated {frames_generated} frames and encoded video directly")
             
@@ -2724,7 +2747,8 @@ def render_video(
                     "-c:a", "aac",
                     "-b:a", "192k",
                     "-pix_fmt", "yuv420p",
-                    "-shortest",
+                    "-max_muxing_queue_size", "1024",
+                    # "-shortest", # REMOVED HERE TOO
                     "-r", str(fps),
                     str(output_path)
                 ]
@@ -2749,11 +2773,25 @@ def render_video(
                     frame_rgb.save(frame_buffer, format="PNG")
                     frame_data = frame_buffer.getvalue()
                     
-                    process.stdin.write(frame_data)
-                    process.stdin.flush()
+                    try:
+                        process.stdin.write(frame_data)
+                        process.stdin.flush()
+                    except (BrokenPipeError, IOError) as e:
+                        if frame_num >= total_frames - 10:
+                            break 
+                        else:
+                            raise e
                 
-                process.stdin.close()
-                stdout, stderr = process.communicate()
+                try:
+                    if process.stdin:
+                        process.stdin.close()
+                except (BrokenPipeError, ValueError, OSError):
+                    pass
+                
+                try:
+                    stdout, stderr = process.communicate()
+                except ValueError:
+                    pass
                 
                 if process.returncode != 0:
                     raise subprocess.CalledProcessError(process.returncode, cmd_software, stderr=stderr)

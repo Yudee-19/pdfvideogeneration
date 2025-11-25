@@ -92,3 +92,16 @@ def generate_reels_video_task(
     except Exception as e:
         logger.error(f"Reels task failed: {e}")
         return {"status": "failed", "error": str(e)}
+    
+@celery_app.task(bind=True, name="generate_video_from_audio")
+def generate_video_from_audio_task(self, job_id: str, audio_path_str: str):
+    try:
+        logger.info(f"Worker processing audio upload job: {job_id}")
+        pipeline_service.run_pipeline_from_audio(
+            job_id=job_id,
+            audio_path=Path(audio_path_str)
+        )
+        return {"status": "success", "job_id": job_id}
+    except Exception as e:
+        logger.error(f"Audio task failed: {e}")
+        return {"status": "failed", "error": str(e)}

@@ -23,6 +23,8 @@ from app.tasks import (
     generate_video_from_text_task, 
     generate_reels_video_task
 )
+from fastapi.responses import RedirectResponse  # <--- Add this
+from app.utils.s3_utils import s3_manager       # <--- Add this
 
 logger = logging.getLogger(__name__)
 
@@ -169,72 +171,158 @@ async def upload_pdf(
     )
 
 
+# @app.get("/api/jobs/{job_id}", response_model=JobResponse)
+# async def get_job_status(job_id: str):
+#     """
+#     Get the status of a job.
+#     Reads directly from disk to ensure latest status from Worker.
+#     """
+#     # 1. Try reading from disk (The Source of Truth)
+#     job_dir = settings.JOBS_OUTPUT_PATH / job_id
+#     metadata_path = job_dir / "job_metadata.json"
+    
+#     if metadata_path.exists():
+#         try:
+#             with open(metadata_path, 'r', encoding='utf-8') as f:
+#                 data = json.load(f)
+#                 return JobResponse(
+#                     job_id=job_id,
+#                     status=data.get("status", "unknown"),
+#                     message=data.get("message", ""),
+#                     created_at=data.get("created_at", ""),
+#                     metadata=data,  # Contains the S3 paths
+#                     progress=data.get("progress")
+#                 )
+#         except Exception as e:
+#             logger.error(f"Error reading metadata for {job_id}: {e}")
+#             # Don't crash, try fallback
+    
+#     # 2. Fallback: Try memory (unlikely to work if worker is separate, but safe)
+#     job = job_service.get_job(job_id)
+#     if not job:
+#         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+#     return JobResponse(
+#         job_id=job_id,
+#         status=job.get("status", "unknown"),
+#         message=job.get("message", ""),
+#         created_at=job.get("created_at", ""),
+#         metadata=job.get("metadata", {}),
+#         progress=job.get("progress")
+#     )
+
+
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 async def get_job_status(job_id: str):
     """
-    Get the status of a job.
-    
-    Args:
-        job_id: Unique job identifier
-    
-    Returns:
-        JobResponse with current status
+    Get job status. 
+    Priority: Disk (Fastest) -> S3 (Reliable) -> Memory (Fallback).
     """
-    try:
-        # Always reload from disk to get latest progress updates
-        # The background task writes to disk, so we need to read from there
-        job_service._load_jobs()
-        job = job_service.get_job(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-        
-        progress = job.get("progress")
-        logger.info(f"Job {job_id} status check - Status: {job.get('status')}, Progress: {progress}, Message: {job.get('message')}")
-        
+    # # 1. Try Local Disk
+    # job_dir = settings.JOBS_OUTPUT_PATH / job_id
+    # metadata_path = job_dir / "job_metadata.json"
+    
+    # if metadata_path.exists():
+    #     try:
+    #         with open(metadata_path, 'r') as f:
+    #             data = json.load(f)
+    #             return JobResponse(
+    #                 job_id=job_id,
+    #                 status=data.get("status", "unknown"),
+    #                 message=data.get("message", ""),
+    #                 created_at=data.get("created_at", ""),
+    #                 metadata=data,
+    #                 progress=data.get("progress")
+    #             )
+    #     except: pass
+    
+    # 2. Try S3 (The "Cloud Backup")
+    # If we cleaned up the local folder, the status is here.
+    s3_data = s3_manager.get_job_metadata_from_s3(job_id)
+    if s3_data:
         return JobResponse(
             job_id=job_id,
-            status=job.get("status", "unknown"),
-            message=job.get("message", ""),
-            created_at=job.get("created_at", ""),
-            metadata=job.get("metadata", {}),
-            progress=progress
+            status=s3_data.get("status", "unknown"),
+            message=s3_data.get("message", ""),
+            created_at=s3_data.get("created_at", ""),
+            metadata=s3_data,
+            progress=s3_data.get("progress")
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting job status for {job_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error retrieving job status: {str(e)}")
 
-
-@app.get("/api/jobs/{job_id}/download/video")
-async def download_video(job_id: str):
-    """
-    Download the generated video file.
-    
-    Args:
-        job_id: Unique job identifier
-    
-    Returns:
-        Video file
-    """
+    # 3. Fallback to Memory
     job = job_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
-    if job["status"] != "completed":
-        raise HTTPException(status_code=400, detail=f"Job {job_id} is not completed yet")
-    
-    video_path = Path(job["metadata"]["final_video_path"])
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail="Video file not found")
-    
-    return FileResponse(
-        path=str(video_path),
-        filename=video_path.name,
-        media_type="video/mp4"
+    return JobResponse(
+        job_id=job_id,
+        status=job.get("status", "unknown"),
+        message=job.get("message", ""),
+        created_at=job.get("created_at", ""),
+        metadata=job.get("metadata", {}),
+        progress=job.get("progress")
     )
 
+@app.get("/api/jobs/{job_id}/download/video")
+async def download_video(job_id: str):
+    """
+    Redirect to S3 for video download.
+    Reads metadata directly from disk to ensure latest status.
+    """
+    # 1. Define job_data (The variable you were asking about)
+    job_data = None
 
+    # 2. Try reading from disk (The Source of Truth)
+    job_dir = settings.JOBS_OUTPUT_PATH / job_id
+    metadata_path = job_dir / "job_metadata.json"
+    
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, 'r') as f:
+                job_data = json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading metadata for {job_id}: {e}")
+    
+    # 3. Fallback: Try memory if file missing (rare, but safe)
+    if not job_data:
+        job_data = job_service.get_job(job_id)
+    
+    # 4. Validations
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    # Now we check the status from the FRESH data we just loaded
+    if job_data.get("status") != "completed":
+        raise HTTPException(status_code=400, detail=f"Job {job_id} is not completed yet (Status: {job_data.get('status')})")
+    
+    # 5. Generate S3 Link
+    try:
+        # Get path from metadata
+        # It might be in "metadata" sub-dictionary OR at the top level depending on how it was saved
+        path_str = job_data.get("metadata", {}).get("final_video_path") or job_data.get("final_video_path")
+        
+        if not path_str:
+             raise HTTPException(status_code=404, detail="Video path not found in job data")
+
+        # Extract just the filename (e.g., "reels_..._final_video.mp4")
+        filename = Path(path_str).name
+        
+        # Construct S3 Key: jobs/{job_id}/{filename}
+        s3_key = f"jobs/{job_id}/{filename}"
+        
+        # Generate VIP Ticket (Presigned URL)
+        url = s3_manager.generate_presigned_url(s3_key)
+        
+        if url:
+            return RedirectResponse(url=url)
+        else:
+            raise HTTPException(status_code=500, detail="Could not generate S3 link")
+            
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing download: {str(e)}")
+    
+    
 @app.post("/api/jobs/{job_id}/generate-summary", response_model=JobResponse)
 async def generate_summary(
     job_id: str,
@@ -757,6 +845,40 @@ async def list_cartesia_models():
     models = cartesia_api_service.list_models()
     return {"models": models}
 
+@app.post("/api/upload-audio", response_model=JobResponse)
+async def upload_audio_file(
+    file: UploadFile = File(...),
+):
+    if not file.filename.endswith(('.mp3', '.wav', '.m4a')):
+        raise HTTPException(status_code=400, detail="File must be an audio file (mp3, wav, m4a)")
+    
+    # Generate ID
+    job_id = f"audio_upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    job_dir = settings.JOBS_OUTPUT_PATH / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save Audio
+    audio_path = job_dir / file.filename
+    with open(audio_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+    
+    # Create Job
+    job_service.create_job(job_id=job_id, pdf_path=None)
+    
+    # Send to Celery
+    from app.tasks import generate_video_from_audio_task
+    generate_video_from_audio_task.delay(
+        job_id=job_id, 
+        audio_path_str=str(audio_path)
+    )
+    
+    return JobResponse(
+        job_id=job_id,
+        status="queued",
+        message="Audio uploaded, processing started",
+        created_at=datetime.now().isoformat()
+    )
 
 if __name__ == "__main__":
     import uvicorn
