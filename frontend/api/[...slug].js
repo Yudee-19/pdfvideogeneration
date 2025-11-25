@@ -150,19 +150,32 @@ export default async function handler(req, res) {
         console.log('[Proxy] Body type:', typeof req.body);
         
         // Parse multipart data using busboy
+        // First, buffer the entire request body since Vercel req might not be a stream
         return new Promise((resolve, reject) => {
           const FormData = require('form-data');
           const formData = new FormData();
-          const bb = busboy({ headers: req.headers });
           
-          // Collect all fields and files
-          const fields = {};
-          const files = [];
+          // Buffer the request body first
+          const chunks = [];
+          req.on('data', (chunk) => {
+            chunks.push(chunk);
+          });
           
-          let fileCount = 0;
-          let fieldCount = 0;
-          let completedFiles = 0;
-          let sent = false; // Guard to prevent multiple sends
+          req.on('end', () => {
+            const bodyBuffer = Buffer.concat(chunks);
+            console.log(`[Proxy] Request body buffered: ${bodyBuffer.length} bytes`);
+            
+            // Now parse with busboy
+            const bb = busboy({ headers: req.headers });
+            
+            // Collect all fields and files
+            const fields = {};
+            const files = [];
+            
+            let fileCount = 0;
+            let fieldCount = 0;
+            let completedFiles = 0;
+            let sent = false; // Guard to prevent multiple sends
           
           const sendToBackend = () => {
             if (sent) {
@@ -233,11 +246,49 @@ export default async function handler(req, res) {
               });
           };
           
+          bb.on('file', (name, file, info) => {
+            fileCount++;
+            const { filename, encoding, mimeType } = info;
+            console.log(`[Proxy] File field: ${name}, filename: ${filename}, mimeType: ${mimeType}`);
+            
+            const fileChunks = [];
+            file.on('data', (data) => {
+              fileChunks.push(data);
+            });
+            
+            file.on('end', () => {
+              const buffer = Buffer.concat(fileChunks);
+              console.log(`[Proxy] File ${name} buffered: ${buffer.length} bytes`);
+              files.push({ name, buffer, filename, mimeType });
+              completedFiles++;
+              
+              // Check if all files are done
+              if (completedFiles === fileCount && Object.keys(fields).length >= fieldCount) {
+                sendToBackend();
+              }
+            });
+            
+            file.on('error', (error) => {
+              console.error(`[Proxy] File stream error for ${name}:`, error);
+            });
+          });
+          
+          bb.on('field', (name, value) => {
+            fieldCount++;
+            console.log(`[Proxy] Field: ${name} = ${value}`);
+            fields[name] = value;
+            
+            // Check if all fields and files are done
+            if (completedFiles === fileCount && Object.keys(fields).length >= fieldCount) {
+              sendToBackend();
+            }
+          });
+          
           bb.on('finish', () => {
             console.log('[Proxy] Busboy finished parsing');
             // sendToBackend will be called when all files and fields are collected
             // But also check here in case everything was already collected
-            if (completedFiles === fileCount && Object.keys(fields).length === fieldCount) {
+            if (!sent && completedFiles === fileCount && Object.keys(fields).length >= fieldCount) {
               sendToBackend();
             }
           });
@@ -251,8 +302,19 @@ export default async function handler(req, res) {
             resolve();
           });
           
-          // Pipe the request to busboy
-          req.pipe(bb);
+          // Write the buffered body to busboy
+          bb.write(bodyBuffer);
+          bb.end();
+          });
+          
+          req.on('error', (error) => {
+            console.error('[Proxy] Request stream error:', error);
+            res.status(400).json({
+              error: 'Failed to read request body',
+              message: error.message
+            });
+            resolve();
+          });
         });
       } else if (contentType.includes('application/json')) {
         fetchOptions.body = JSON.stringify(req.body);
