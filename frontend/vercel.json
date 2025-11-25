@@ -1,20 +1,6 @@
 {
   "buildCommand": "npm run build",
   "outputDirectory": "build",
-  "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "/api/:path*"
-    },
-    {
-      "source": "/static/:path*",
-      "destination": "/static/:path*"
-    },
-    {
-      "source": "/:path*",
-      "destination": "/index.html"
-    }
-  ],
   "headers": [
     {
       "source": "/static/(.*)",
