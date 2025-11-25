@@ -6,9 +6,12 @@
 const BACKEND_URL = process.env.BACKEND_URL || 'http://54.198.232.153:8000';
 
 export default async function handler(req, res) {
-  console.log(`[Proxy] Function called - Method: ${req.method}, URL: ${req.url}`);
-  console.log(`[Proxy] Query:`, req.query);
-  console.log(`[Proxy] Headers:`, req.headers);
+  console.log(`[Proxy] ========== FUNCTION CALLED ==========`);
+  console.log(`[Proxy] Method: ${req.method}`);
+  console.log(`[Proxy] URL: ${req.url}`);
+  console.log(`[Proxy] Query:`, JSON.stringify(req.query));
+  console.log(`[Proxy] BACKEND_URL: ${process.env.BACKEND_URL || 'NOT SET - using default'}`);
+  console.log(`[Proxy] Headers:`, JSON.stringify(req.headers));
   
   // Set CORS headers first
   res.setHeader('Access-Control-Allow-Origin', '*');
