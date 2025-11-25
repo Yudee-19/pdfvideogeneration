@@ -1,6 +1,16 @@
 {
   "buildCommand": "npm run build",
   "outputDirectory": "build",
+  "rewrites": [
+    {
+      "source": "/static/(.*)",
+      "destination": "/static/$1"
+    },
+    {
+      "source": "/((?!api|static).*)",
+      "destination": "/index.html"
+    }
+  ],
   "headers": [
     {
       "source": "/static/(.*)",
