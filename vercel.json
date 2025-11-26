@@ -3,8 +3,8 @@
   "outputDirectory": "frontend/build",
   "rewrites": [
     {
-      "source": "/(.*)",
-      "destination": "/index.html"
+      "source": "/api/:path*",
+      "destination": "http://54.198.232.153:8000/:path*"
     }
   ],
   "headers": [
