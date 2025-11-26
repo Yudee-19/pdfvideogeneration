@@ -11,8 +11,8 @@ const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://54.198.232.153:80
 // Log the API URL being used (helpful for debugging)
 console.log('API Base URL:', API_BASE_URL);
 console.log('Environment:', process.env.NODE_ENV);
-console.log('Using Proxy:', useProxy);
-console.log('Is Vercel:', isVercel);
+// console.log('Using Proxy:', useProxy);
+// console.log('Is Vercel:', isVercel);
 
 const api = axios.create({
   baseURL: API_BASE_URL,
