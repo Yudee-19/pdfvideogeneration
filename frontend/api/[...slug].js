@@ -7,12 +7,13 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://54.198.232.153:8000';
 const busboy = require('busboy');
 
 export default async function handler(req, res) {
+  // Log immediately to confirm function is being called
   console.log(`[Proxy] ========== FUNCTION CALLED ==========`);
   console.log(`[Proxy] Method: ${req.method}`);
   console.log(`[Proxy] URL: ${req.url}`);
+  console.log(`[Proxy] Pathname: ${req.url?.split('?')[0]}`);
   console.log(`[Proxy] Query:`, JSON.stringify(req.query));
   console.log(`[Proxy] BACKEND_URL: ${process.env.BACKEND_URL || 'NOT SET - using default'}`);
-  console.log(`[Proxy] Headers:`, JSON.stringify(req.headers));
   
   // Set CORS headers first
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -59,13 +60,17 @@ export default async function handler(req, res) {
     const isRootEndpoint = rootEndpoints.includes(apiPath);
     
     // Construct the backend URL
+    // Encode each path segment separately to handle spaces and special characters
     let backendUrl;
     if (isRootEndpoint) {
       // Root-level endpoints: / or /health
       backendUrl = apiPath === '' ? `${BACKEND_URL}/` : `${BACKEND_URL}/${apiPath}`;
     } else {
       // All other endpoints are under /api/
-      backendUrl = `${BACKEND_URL}/api/${apiPath}`;
+      // Split the path and encode each segment separately
+      const pathSegments = apiPath.split('/').map(segment => encodeURIComponent(segment));
+      const encodedPath = pathSegments.join('/');
+      backendUrl = `${BACKEND_URL}/api/${encodedPath}`;
     }
     
     // Add query parameters (excluding slug-related keys)
