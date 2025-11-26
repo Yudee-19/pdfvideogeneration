@@ -3,12 +3,10 @@ import axios from 'axios';
 // Determine API base URL
 // Use proxy on Vercel to avoid mixed content (HTTPS -> HTTP) issues
 // On localhost, connect directly
-const isVercel = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
-const useProxy = isVercel || process.env.REACT_APP_USE_PROXY === 'true';
+// const isVercel = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
+// const useProxy = isVercel || process.env.REACT_APP_USE_PROXY === 'true';
 
-const API_BASE_URL = useProxy
-  ? '/api' // Use proxy on Vercel
-  : (process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000/api');
+const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000/api');
 
 // Log the API URL being used (helpful for debugging)
 console.log('API Base URL:', API_BASE_URL);
