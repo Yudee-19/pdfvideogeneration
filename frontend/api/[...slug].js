@@ -42,6 +42,17 @@ export default async function handler(req, res) {
       slug = [];
     }
     
+    // Alternative: Parse from req.url if slug is empty (fallback for edge cases)
+    if (slug.length === 0 && req.url) {
+      const urlPath = req.url.split('?')[0]; // Remove query string
+      // Remove /api prefix if present
+      const pathWithoutApi = urlPath.startsWith('/api/') ? urlPath.slice(5) : urlPath.slice(1);
+      if (pathWithoutApi) {
+        slug = pathWithoutApi.split('/').filter(Boolean);
+        console.log(`[Proxy] Fallback: Parsed path from req.url:`, pathWithoutApi);
+      }
+    }
+    
     let apiPath = slug.join('/');
     
     console.log(`[Proxy] Slug param:`, slugParam);
