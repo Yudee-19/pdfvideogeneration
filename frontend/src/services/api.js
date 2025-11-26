@@ -6,9 +6,9 @@ import axios from 'axios';
 const isVercel = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
 const useProxy = isVercel || process.env.REACT_APP_USE_PROXY === 'true';
 
-const API_BASE_URL = useProxy 
+const API_BASE_URL = useProxy
   ? '/api' // Use proxy on Vercel
-  : (process.env.REACT_APP_API_URL || 'http://localhost:8000');
+  : (process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000');
 
 // Log the API URL being used (helpful for debugging)
 console.log('API Base URL:', API_BASE_URL);
@@ -64,9 +64,9 @@ api.interceptors.response.use(
       code: error.code, // Network errors have codes like 'ERR_NETWORK', 'ERR_CORS', etc.
       request: error.request
     };
-    
+
     console.error('API Response Error:', errorDetails);
-    
+
     // Provide more helpful error messages
     if (error.code === 'ERR_NETWORK' || error.code === 'ERR_INTERNET_DISCONNECTED') {
       error.userMessage = 'Network error: Unable to connect to the backend server. Please check if the server is running.';
@@ -81,7 +81,7 @@ api.interceptors.response.use(
     } else {
       error.userMessage = error.message || 'An unexpected error occurred. Please check the console for details.';
     }
-    
+
     return Promise.reject(error);
   }
 );
@@ -166,11 +166,11 @@ export const summarizePDF = async (file) => {
   const formData = new FormData();
   formData.append('file', file);
 
-      // Don't set Content-Type - axios will set it automatically with boundary for FormData
-      // baseURL is already '/api', so just use '/summarize-pdf' not '/api/summarize-pdf'
-      const response = await api.post('/summarize-pdf', formData, {
-        timeout: 300000, // 5 minutes for summarization
-      });
+  // Don't set Content-Type - axios will set it automatically with boundary for FormData
+  // baseURL is already '/api', so just use '/summarize-pdf' not '/api/summarize-pdf'
+  const response = await api.post('/summarize-pdf', formData, {
+    timeout: 300000, // 5 minutes for summarization
+  });
   return response.data;
 };
 
@@ -188,11 +188,11 @@ export const generateVideoFromText = async (text, voiceProvider = 'openai', open
     formData.append('cartesia_model_id', cartesiaModelId);
   }
 
-      // Don't set Content-Type - axios will set it automatically with boundary for FormData
-      // baseURL is already '/api', so just use '/generate-video-from-text' not '/api/generate-video-from-text'
-      const response = await api.post('/generate-video-from-text', formData, {
-        timeout: 600000, // 10 minutes for video generation
-      });
+  // Don't set Content-Type - axios will set it automatically with boundary for FormData
+  // baseURL is already '/api', so just use '/generate-video-from-text' not '/api/generate-video-from-text'
+  const response = await api.post('/generate-video-from-text', formData, {
+    timeout: 600000, // 10 minutes for video generation
+  });
   return response.data;
 };
 
@@ -210,11 +210,11 @@ export const generateReelsVideo = async (text, voiceProvider = 'openai', openaiV
     formData.append('cartesia_model_id', cartesiaModelId);
   }
 
-      // Don't set Content-Type - axios will set it automatically with boundary for FormData
-      // baseURL is already '/api', so just use '/generate-reels-video' not '/api/generate-reels-video'
-      const response = await api.post('/generate-reels-video', formData, {
-        timeout: 600000, // 10 minutes for video generation
-      });
+  // Don't set Content-Type - axios will set it automatically with boundary for FormData
+  // baseURL is already '/api', so just use '/generate-reels-video' not '/api/generate-reels-video'
+  const response = await api.post('/generate-reels-video', formData, {
+    timeout: 600000, // 10 minutes for video generation
+  });
   return response.data;
 };
 

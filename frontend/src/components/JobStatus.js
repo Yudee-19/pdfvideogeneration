@@ -11,13 +11,13 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
   useEffect(() => {
     let isMounted = true;
     let timeoutId = null;
-    
+
     const fetchStatus = async () => {
       try {
         const response = await getJobStatus(jobId);
-        
+
         if (!isMounted) return;
-        
+
         // Debug logging
         console.log('Job status response:', {
           status: response.status,
@@ -25,10 +25,10 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
           message: response.message,
           metadata: response.metadata
         });
-        
+
         setStatus(response);
         setLoading(false);
-        
+
         // Notify parent component of status update
         // Always notify, but parent will check if it should show popup
         if (onStatusUpdate) {
@@ -41,10 +41,10 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
         }
       } catch (err) {
         if (!isMounted) return;
-        
+
         const isTimeout = err.code === 'ECONNABORTED' || err.message.includes('timeout');
         const errorMessage = err.response?.data?.detail || err.message || 'Failed to fetch job status';
-        
+
         // Use functional update to get current status
         setStatus(currentStatus => {
           // Don't set error if we already have status data (network error during polling)
@@ -65,7 +65,7 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
           }
           return currentStatus; // Keep current status
         });
-        
+
         console.error('Status fetch error:', err);
         console.error('Error details:', {
           message: err.message,
@@ -131,7 +131,7 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
           <strong>Error:</strong> {error}
           <br />
           <small>
-            Make sure the backend API is running on {process.env.REACT_APP_API_URL || 'http://localhost:8000'}
+            Make sure the backend API is running on {process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000'}
             <br />
             Job ID: {jobId}
           </small>
@@ -190,9 +190,9 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
             Main Video Generation
           </div>
           <div className="progress-bar">
-            <div 
-              className="progress-fill" 
-              style={{ 
+            <div
+              className="progress-fill"
+              style={{
                 width: `${mainProgress}%`,
                 transition: 'width 0.3s ease'
               }}
