@@ -10,7 +10,7 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
 
   useEffect(() => {
     let isMounted = true;
-    let timeoutId = null;
+    let intervalId = null;
 
     const fetchStatus = async () => {
       try {
@@ -30,14 +30,16 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
         setLoading(false);
 
         // Notify parent component of status update
-        // Always notify, but parent will check if it should show popup
         if (onStatusUpdate) {
           onStatusUpdate(response);
         }
 
-        // Continue polling if job is still processing
-        if (response.status === 'processing' || response.status === 'pending' || response.status === 'running') {
-          timeoutId = setTimeout(fetchStatus, 2000); // Poll every 2 seconds
+        // Stop polling if job is complete or failed
+        const isTerminalState = ['completed', 'failed', 'cancelled'].includes(response.status);
+        if (isTerminalState && intervalId) {
+          console.log('Job reached terminal state, stopping polling');
+          clearInterval(intervalId);
+          intervalId = null;
         }
       } catch (err) {
         if (!isMounted) return;
@@ -45,9 +47,7 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
         const isTimeout = err.code === 'ECONNABORTED' || err.message.includes('timeout');
         const errorMessage = err.response?.data?.detail || err.message || 'Failed to fetch job status';
 
-        // Use functional update to get current status
         setStatus(currentStatus => {
-          // Don't set error if we already have status data (network error during polling)
           if (!currentStatus) {
             if (isTimeout) {
               setError('Request timeout - the server may be slow or unreachable. Please check if the backend is running.');
@@ -56,36 +56,29 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
             }
             setLoading(false);
           } else {
-            // If we have status, just log the error but keep showing current status
             if (isTimeout) {
               console.warn('Status fetch timeout (continuing with cached status):', err.message);
             } else {
               console.warn('Status fetch error (continuing with cached status):', err.message);
             }
           }
-          return currentStatus; // Keep current status
+          return currentStatus;
         });
 
         console.error('Status fetch error:', err);
-        console.error('Error details:', {
-          message: err.message,
-          code: err.code,
-          response: err.response?.data,
-          status: err.response?.status,
-          url: err.config?.url,
-          timeout: err.config?.timeout
-        });
       }
     };
 
+    // Initial fetch
     fetchStatus();
-    const interval = setInterval(fetchStatus, 3000); // Poll every 3 seconds
+
+    // Poll every 3 seconds
+    intervalId = setInterval(fetchStatus, 3000);
 
     return () => {
       isMounted = false;
-      clearInterval(interval);
-      if (timeoutId) {
-        clearTimeout(timeoutId);
+      if (intervalId) {
+        clearInterval(intervalId);
       }
     };
   }, [jobId, onStatusUpdate]);
@@ -131,7 +124,7 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
           <strong>Error:</strong> {error}
           <br />
           <small>
-            Make sure the backend API is running on {process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000'}
+            Make sure the backend API is running on {process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000/api'}
             <br />
             Job ID: {jobId}
           </small>

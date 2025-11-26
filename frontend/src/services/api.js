@@ -8,7 +8,7 @@ const useProxy = isVercel || process.env.REACT_APP_USE_PROXY === 'true';
 
 const API_BASE_URL = useProxy
   ? '/api' // Use proxy on Vercel
-  : (process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000');
+  : (process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000/api');
 
 // Log the API URL being used (helpful for debugging)
 console.log('API Base URL:', API_BASE_URL);
