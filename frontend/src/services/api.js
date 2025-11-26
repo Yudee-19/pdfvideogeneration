@@ -113,40 +113,52 @@ export const uploadPDF = async (file, startPage, endPage, generateSummary = fals
 
 export const getJobStatus = async (jobId) => {
   // baseURL is already '/api', so just use '/jobs/...' not '/api/jobs/...'
-  const response = await api.get(`/jobs/${jobId}`, {
+  // URL-encode the jobId to handle spaces and special characters
+  const encodedJobId = encodeURIComponent(jobId);
+  const response = await api.get(`/jobs/${encodedJobId}`, {
     timeout: 5000, // 5 seconds for status checks (should be fast)
   });
   return response.data;
 };
 
 export const downloadVideo = async (jobId) => {
-  const response = await api.get(`/jobs/${jobId}/download/video`, {
+  // URL-encode the jobId to handle spaces and special characters
+  const encodedJobId = encodeURIComponent(jobId);
+  const response = await api.get(`/jobs/${encodedJobId}/download/video`, {
     responseType: 'blob',
   });
   return response.data;
 };
 
 export const downloadSummary = async (jobId) => {
-  const response = await api.get(`/jobs/${jobId}/download/summary`, {
+  // URL-encode the jobId to handle spaces and special characters
+  const encodedJobId = encodeURIComponent(jobId);
+  const response = await api.get(`/jobs/${encodedJobId}/download/summary`, {
     responseType: 'text',
   });
   return response.data;
 };
 
 export const generateSummaryVideo = async (jobId) => {
-  const response = await api.post(`/jobs/${jobId}/generate-summary-video`);
+  // URL-encode the jobId to handle spaces and special characters
+  const encodedJobId = encodeURIComponent(jobId);
+  const response = await api.post(`/jobs/${encodedJobId}/generate-summary-video`);
   return response.data;
 };
 
 export const downloadSummaryVideo = async (jobId) => {
-  const response = await api.get(`/jobs/${jobId}/download/summary-video`, {
+  // URL-encode the jobId to handle spaces and special characters
+  const encodedJobId = encodeURIComponent(jobId);
+  const response = await api.get(`/jobs/${encodedJobId}/download/summary-video`, {
     responseType: 'blob',
   });
   return response.data;
 };
 
 export const generateSummary = async (jobId) => {
-  const response = await api.post(`/jobs/${jobId}/generate-summary`);
+  // URL-encode the jobId to handle spaces and special characters
+  const encodedJobId = encodeURIComponent(jobId);
+  const response = await api.post(`/jobs/${encodedJobId}/generate-summary`);
   return response.data;
 };
 
