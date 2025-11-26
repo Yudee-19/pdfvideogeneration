@@ -3,7 +3,7 @@
  * Uses catch-all route [...slug] to handle all /api/* requests
  */
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://54.198.232.153:8000/api';
+const BACKEND_URL = process.env.BACKEND_URL || "/api";
 
 export default async function handler(req, res) {
   console.log(`[Proxy] Function called - Method: ${req.method}, URL: ${req.url}`);

@@ -3,7 +3,7 @@
  * Uses catch-all route [...slug] to handle all /api/* requests
  */
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://54.198.232.153:8000/api';
+const BACKEND_URL = "/api";
 const busboy = require('busboy');
 
 export default async function handler(req, res) {
