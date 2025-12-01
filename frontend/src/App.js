@@ -8,7 +8,7 @@ import SummaryVideoPrompt from './components/SummaryVideoPrompt';
 import SummaryGeneration from './components/SummaryGeneration';
 import SummaryReview from './components/SummaryReview';
 import ReelsShorts from './components/ReelsShorts';
-
+import AudioUpload from './components/AudioUpload';
 function App() {
   const [currentView, setCurrentView] = useState('home'); // 'home', 'generate-video', 'summary-video', 'summary-generation', 'summary-review', 'job-status'
   const [currentJobId, setCurrentJobId] = useState(null);
@@ -19,6 +19,7 @@ function App() {
   const [jobStatus, setJobStatus] = useState(null);
   const [summaryPromptShown, setSummaryPromptShown] = useState(false);
   const [summaryVideoPromptShown, setSummaryVideoPromptShown] = useState(false);
+  const [stopPolling, setStopPolling] = useState(false);
 
   const handleSelectOption = (option) => {
     if (option === 'generate-video') {
@@ -27,6 +28,8 @@ function App() {
       setCurrentView('summary-generation');
     } else if (option === 'reels-shorts') {
       setCurrentView('reels-shorts');
+    } else if (option === 'audio-video') { // <--- Added this
+      setCurrentView('audio-video');
     }
   };
 
@@ -90,21 +93,21 @@ function App() {
         {currentView === 'home' && (
           <HomePage onSelectOption={handleSelectOption} />
         )}
-        
+
         {currentView === 'generate-video' && (
-          <PDFUpload 
+          <PDFUpload
             onUploadSuccess={handleUploadSuccess}
             onBack={() => setCurrentView('home')}
           />
         )}
-        
+
         {currentView === 'summary-generation' && (
           <SummaryGeneration
             onSummaryGenerated={handleSummaryGenerated}
             onBack={() => setCurrentView('home')}
           />
         )}
-        
+
         {currentView === 'summary-review' && summaryText && (
           <SummaryReview
             summaryJobId={summaryJobId}
@@ -113,21 +116,28 @@ function App() {
             onBack={() => setCurrentView('summary-generation')}
           />
         )}
-        
+
         {currentView === 'reels-shorts' && (
           <ReelsShorts
             onVideoGenerated={handleVideoGenerated}
             onBack={() => setCurrentView('home')}
           />
         )}
-        
+        {currentView === 'audio-video' && (
+          <AudioUpload
+            onUploadSuccess={handleUploadSuccess}
+            onBack={() => setCurrentView('home')}
+          />
+        )}
+
         {currentView === 'job-status' && currentJobId && (
           <>
             <JobStatus
               jobId={currentJobId}
               onStatusUpdate={handleMainVideoComplete}
+              stopPolling={stopPolling}
             />
-            
+
             {showSummaryPrompt && (
               <SummaryPrompt
                 jobId={currentJobId}

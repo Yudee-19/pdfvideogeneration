@@ -1,18 +1,29 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { getJobStatus, downloadVideo } from '../services/api';
 import './JobStatus.css';
 
-const JobStatus = ({ jobId, onStatusUpdate }) => {
+const JobStatus = ({ jobId, onStatusUpdate, stopPolling = false }) => {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(false);
 
+  // Use a ref to store the latest callback. 
+  // This prevents the polling effect from restarting just because the parent re-rendered.
+  const onStatusUpdateRef = useRef(onStatusUpdate);
+
+  useEffect(() => {
+    onStatusUpdateRef.current = onStatusUpdate;
+  }, [onStatusUpdate]);
+
   useEffect(() => {
     let isMounted = true;
-    let intervalId = null;
+    let timeoutId = null;
 
     const fetchStatus = async () => {
+      // If we are commanded to stop externally, cease operations immediately
+      if (stopPolling) return;
+
       try {
         const response = await getJobStatus(jobId);
 
@@ -21,67 +32,63 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
         // Debug logging
         console.log('Job status response:', {
           status: response.status,
-          progress: response.progress,
-          message: response.message,
-          metadata: response.metadata
+          progress: response.progress
         });
 
         setStatus(response);
         setLoading(false);
 
-        // Notify parent component of status update
-        if (onStatusUpdate) {
-          onStatusUpdate(response);
+        // Safe callback execution
+        if (onStatusUpdateRef.current) {
+          onStatusUpdateRef.current(response);
         }
 
-        // Stop polling if job is complete or failed
+        // Check if job is finished
         const isTerminalState = ['completed', 'failed', 'cancelled'].includes(response.status);
-        if (isTerminalState && intervalId) {
-          console.log('Job reached terminal state, stopping polling');
-          clearInterval(intervalId);
-          intervalId = null;
+
+        // CRITICAL FIX: Only schedule the NEXT poll if:
+        // 1. The component is still mounted
+        // 2. The job is NOT in a terminal state
+        // 3. We haven't been asked to stop polling
+        if (!isTerminalState && !stopPolling) {
+          timeoutId = setTimeout(fetchStatus, 5000); // Poll every 5 seconds
         }
+
       } catch (err) {
         if (!isMounted) return;
 
         const isTimeout = err.code === 'ECONNABORTED' || err.message.includes('timeout');
         const errorMessage = err.response?.data?.detail || err.message || 'Failed to fetch job status';
 
+        console.error('Status fetch error:', err);
+
+        // Update error state only if we don't have a status yet
         setStatus(currentStatus => {
           if (!currentStatus) {
-            if (isTimeout) {
-              setError('Request timeout - the server may be slow or unreachable. Please check if the backend is running.');
-            } else {
-              setError(errorMessage);
-            }
+            setError(isTimeout ? 'Request timeout' : errorMessage);
             setLoading(false);
-          } else {
-            if (isTimeout) {
-              console.warn('Status fetch timeout (continuing with cached status):', err.message);
-            } else {
-              console.warn('Status fetch error (continuing with cached status):', err.message);
-            }
           }
           return currentStatus;
         });
 
-        console.error('Status fetch error:', err);
+        // On error, retry after a longer delay (unless stopped)
+        if (!stopPolling) {
+          timeoutId = setTimeout(fetchStatus, 10000);
+        }
       }
     };
 
-    // Initial fetch
+    // Trigger the loop
     fetchStatus();
 
-    // Poll every 3 seconds
-    intervalId = setInterval(fetchStatus, 3000);
-
+    // Cleanup function
     return () => {
       isMounted = false;
-      if (intervalId) {
-        clearInterval(intervalId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
       }
     };
-  }, [jobId, onStatusUpdate]);
+  }, [jobId, stopPolling]); // Removed onStatusUpdate from dependencies
 
   const handleDownload = async () => {
     if (!status?.metadata?.final_video_path) {
@@ -124,8 +131,6 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
           <strong>Error:</strong> {error}
           <br />
           <small>
-            Make sure the backend API is running on {process.env.REACT_APP_API_URL || 'http://54.198.232.153:8000/api'}
-            <br />
             Job ID: {jobId}
           </small>
         </div>
@@ -393,4 +398,3 @@ const JobStatus = ({ jobId, onStatusUpdate }) => {
 };
 
 export default JobStatus;
-

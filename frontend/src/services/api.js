@@ -236,5 +236,17 @@ export const listCartesiaModels = async () => {
   return response.data;
 };
 
+export const uploadAudio = async (file) => {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  // Use axios for consistency with other API functions
+  // baseURL is already '/api', so just use '/upload-audio'
+  const response = await api.post('/upload-audio', formData, {
+    timeout: 60000, // 60 seconds for audio upload
+  });
+  return response.data;
+};
+
 export default api;
 
