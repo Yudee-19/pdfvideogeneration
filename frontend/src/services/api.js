@@ -6,7 +6,7 @@ import axios from 'axios';
 // const isVercel = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
 // const useProxy = isVercel || process.env.REACT_APP_USE_PROXY === 'true';
 
-const API_BASE_URL = "/api";
+const API_BASE_URL = "http://54.198.232.153:8000/api";
 
 // Log the API URL being used (helpful for debugging)
 console.log('API Base URL:', API_BASE_URL);
@@ -19,7 +19,7 @@ const api = axios.create({
   // Don't set default Content-Type - let axios set it based on data type
   // For FormData, axios will set multipart/form-data with boundary
   // For JSON, axios will set application/json
-  timeout: 10000, // 10 second timeout for most requests
+  timeout: 10000000, // 10 second timeout for most requests
 });
 
 // Add request interceptor for debugging
