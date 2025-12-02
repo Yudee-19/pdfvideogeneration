@@ -104,7 +104,7 @@ export const uploadPDF = async (file, startPage, endPage, generateSummary = fals
   // Don't set Content-Type - axios will set it automatically with boundary for FormData
   // baseURL is already '/api', so just use '/upload' not '/api/upload'
   const response = await api.post('/upload', formData, {
-    timeout: 60000, // 60 seconds for file upload
+    timeout: 600000, // 600 seconds for file upload
   });
   return response.data;
 };
@@ -114,7 +114,7 @@ export const getJobStatus = async (jobId) => {
   // URL-encode the jobId to handle spaces and special characters
   const encodedJobId = encodeURIComponent(jobId);
   const response = await api.get(`/jobs/${encodedJobId}`, {
-    timeout: 5000, // 5 seconds for status checks (should be fast)
+    timeout: 50000, // 50 seconds for status checks (should be fast)
   });
   return response.data;
 };
