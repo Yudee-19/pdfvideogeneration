@@ -33,7 +33,7 @@ const SummaryPrompt = ({ jobId, onSummaryGenerated, onDismiss }) => {
     try {
       // Call API to generate summary
       await generateSummary(jobId);
-      
+
       // Poll for summary completion
       const pollInterval = setInterval(async () => {
         try {
@@ -99,13 +99,16 @@ const SummaryPrompt = ({ jobId, onSummaryGenerated, onDismiss }) => {
   }
 
   return (
-    <div className="card summary-prompt">
+    <div
+      className="card summary-prompt"
+      style={{ display: "none" }}
+    >
       <h3>Generate Book Summary?</h3>
       <p>
         Would you like to generate a comprehensive summary of the entire book?
         This will create a detailed summary that can be used to generate a summary video.
       </p>
-      
+
       {error && (
         <div className="alert alert-error">
           {error}
